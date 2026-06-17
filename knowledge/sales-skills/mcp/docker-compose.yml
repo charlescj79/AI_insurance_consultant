@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  insurance-sales-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile-mcp
+    container_name: insurance-sales-mcp
+    ports:
+      - "${SERVER_PORT:-18060}:18060"
+    environment:
+      - SERVER_TRANSPORT=http
+      - SERVER_PORT=18060
+      - CORS_ORIGINS=*
+    volumes:
+      - ./data:/app/data        # persistence for session data
+      - ../cli/sessions:/app/sessions  # R27: share CLI sessions directory
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:18060/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge

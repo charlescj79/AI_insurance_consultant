@@ -1,0 +1,614 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Insurance Sales MCP Server API",
+    "description": "香港保险咨询销售 AI Agent 工具集 — OpenAPI 3.1 接口规范。5个核心工具，支持stdio JSON-RPC和HTTP传输。",
+    "version": "2.0.0",
+    "contact": {
+      "name": "AiBroker Team"
+    },
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:18060",
+      "description": "本地HTTP传输模式 (默认)"
+    },
+    {
+      "url": "mcp+stdio://server.py",
+      "description": "MCP stdio传输模式"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "MCP Server健康检查",
+        "operationId": "healthCheck",
+        "tags": ["server"],
+        "responses": {
+          "200": {
+            "description": "服务正常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/list": {
+      "post": {
+        "summary": "列出所有可用MCP工具",
+        "operationId": "listTools",
+        "tags": ["tools"],
+        "responses": {
+          "200": {
+            "description": "工具列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolsListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tools/{tool_name}/call": {
+      "post": {
+        "summary": "调用指定MCP工具",
+        "operationId": "callTool",
+        "tags": ["tools"],
+        "parameters": [
+          {
+            "name": "tool_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "insurance_product_query",
+                "compliance_check",
+                "needs_assessment",
+                "objection_handler",
+                "private_sop_runner"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "arguments": {
+                    "type": "object"
+                  }
+                },
+                "required": ["arguments"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具执行结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolCallResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "工具不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 以下详细定义各工具Schema ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━": null,
+
+    "/tools/compliance_check/call": {
+      "post": {
+        "summary": "合规检测 — 14条红线+4条黄线扫描",
+        "operationId": "complianceCheck",
+        "tags": ["tools"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComplianceCheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "合规检测结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComplianceCheckResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/tools/needs_assessment/call": {
+      "post": {
+        "summary": "客户需求诊断 — 分级(A/B/C/D) + 紧迫度 + 需求信号",
+        "operationId": "needsAssessment",
+        "tags": ["tools"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NeedsAssessmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "需求诊断结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NeedsAssessmentResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/tools/insurance_product_query/call": {
+      "post": {
+        "summary": "产品条款查询 — 列表/详情搜索",
+        "operationId": "productQuery",
+        "tags": ["tools"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductQueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "产品查询结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductQueryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/tools/objection_handler/call": {
+      "post": {
+        "summary": "异议处理话术生成 — 6类×3层级",
+        "operationId": "objectionHandler",
+        "tags": ["tools"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ObjectionHandlerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "异议处理话术",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectionHandlerResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/tools/private_sop_runner/call": {
+      "post": {
+        "summary": "私域SOP执行器 — Day-0~Day-7全流程",
+        "operationId": "privateSOPRunner",
+        "tags": ["tools"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivateSOPRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SOP执行结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivateSOPResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {"type": "string", "enum": ["healthy", "unhealthy"]},
+          "server": {"type": "string"},
+          "version": {"type": "string"},
+          "tools_count": {"type": "integer"},
+          "uptime_seconds": {"type": "integer"}
+        }
+      },
+
+      "ToolsListResponse": {
+        "type": "object",
+        "properties": {
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "inputSchema": {"type": "object"}
+              }
+            }
+          }
+        }
+      },
+
+      "ToolCallResponse": {
+        "type": "object",
+        "properties": {
+          "tool_name": {"type": "string"},
+          "arguments": {"type": "object"},
+          "result": {"type": "object"},
+          "status": {"type": "string", "enum": ["success", "error"]}
+        }
+      },
+
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {"type": "integer"},
+              "message": {"type": "string"}
+            }
+          }
+        }
+      },
+
+      "ComplianceCheckRequest": {
+        "type": "object",
+        "required": ["text"],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "待检测的完整文本内容"
+          },
+          "strict_mode": {
+            "type": "boolean",
+            "default": true,
+            "description": "严格模式：启用更多隐式违规检测规则"
+          }
+        }
+      },
+
+      "ComplianceCheckResponse": {
+        "type": "object",
+        "properties": {
+          "compliance_status": {"type": "string", "enum": ["PASS", "FLAGGED", "BLOCKED"]},
+          "violations_found": {"type": "integer"},
+          "violation_details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "rule_id": {"type": "string"},
+                "name": {"type": "string"},
+                "severity": {"type": "string", "enum": ["CRITICAL", "WARNING"]},
+                "matched_text": {"type": "string"},
+                "suggestion": {"type": "string"},
+                "regulatory_ref": {"type": "string"}
+              }
+            }
+          },
+          "red_line_count": {"type": "integer"},
+          "yellow_line_count": {"type": "integer"},
+          "rule_coverage": {
+            "type": "object",
+            "properties": {
+              "red_lines": {"type": "integer"},
+              "yellow_lines": {"type": "integer"}
+            }
+          },
+          "rewrite_suggestion": {"type": "string"}
+        }
+      },
+
+      "NeedsAssessmentRequest": {
+        "type": "object",
+        "required": ["message"],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "用户原始消息/需求描述"
+          },
+          "context_history": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "历史对话上下文（可选，用于多轮需求演化分析）"
+          }
+        }
+      },
+
+      "NeedsAssessmentResponse": {
+        "type": "object",
+        "properties": {
+          "detected_needs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "need_type": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "keywords_matched": {"type": "array", "items": {"type": "string"}}
+              }
+            }
+          },
+          "customer_grade": {"type": "string", "enum": ["A", "B", "C", "D"]},
+          "urgency": {"type": "string", "enum": ["urgent", "warm", "cold"]},
+          "product_recommendation": {
+            "type": "object",
+            "properties": {
+              "core_product": {"type": "string"},
+              "action": {"type": "string", "enum": ["consultation_booking", "content_nurture", "needs_discovery"]}
+            }
+          },
+          "needs_summary": {"type": "string"},
+          "context_enhanced": {"type": "boolean"}
+        }
+      },
+
+      "ProductQueryRequest": {
+        "type": "object",
+        "required": ["action"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["list", "detail"]
+          },
+          "product_name": {
+            "type": "string",
+            "description": "产品名称（detail时必需，支持模糊匹配）"
+          }
+        }
+      },
+
+      "ProductDetailSchema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name_cn": {"type": "string"},
+          "name_en": {"type": "string"},
+          "category": {"type": "string"},
+          "insurance_type": {"type": "string"},
+          "coverage_summary": {"type": "string"},
+          "detailed_coverage": {"type": "string"},
+          "exclusions": {"type": "array", "items": {"type": "string"}},
+          "suitable_for": {"type": "array", "items": {"type": "string"}},
+          "compliance_points": {"type": "array", "items": {"type": "string"}},
+          "common_questions": {"type": "array", "items": {"type": "string"}},
+          "regulatory_refs": {"type": "array", "items": {"type": "string"}}
+        }
+      },
+
+      "ProductQueryResponse": {
+        "type": "object",
+        "properties": {
+          "action": {"type": "string"},
+          "products": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {"type": "string"},
+                "name_cn": {"type": "string"},
+                "category": {"type": "string"}
+              }
+            }
+          },
+          "detail": {
+            "$ref": "#/components/schemas/ProductDetailSchema"
+          }
+        }
+      },
+
+      "ObjectionHandlerRequest": {
+        "type": "object",
+        "required": ["category"],
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": ["price", "trust", "delay", "compare", "credibility", "scope"]
+          },
+          "scenario": {"type": "string", "description": "具体场景关键词"},
+          "tier": {
+            "type": "string",
+            "enum": ["light", "medium", "heavy"],
+            "default": "medium"
+          },
+          "list_all": {
+            "type": "boolean",
+            "default": false,
+            "description": "列出所有异议场景而非生成话术"
+          }
+        }
+      },
+
+      "ObjectionTierSchema": {
+        "type": "object",
+        "properties": {
+          "level": {"type": "string"},
+          "tone": {"type": "string"},
+          "script": {"type": "string"}
+        }
+      },
+
+      "ObjectionHandlerResponse": {
+        "type": "object",
+        "properties": {
+          "category": {"type": "string"},
+          "scenario_en": {"type": "string"},
+          "scenario_cn": {"type": "string"},
+          "tier_requested": {"type": "string"},
+          "tone": {"type": "string"},
+          "script": {"type": "string"},
+          "full_tier_options": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/ObjectionTierSchema"}
+          },
+          "regulatory_notes": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        }
+      },
+
+      "PrivateSOPRequest": {
+        "type": "object",
+        "required": ["action"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["day-sequence", "customer-journey", "get-schedule"]
+          },
+          "day": {"type": "integer", "minimum": 0, "maximum": 7},
+          "grade": {"type": "string", "enum": ["A", "B", "C", "D"]},
+          "channel": {
+            "type": "string",
+            "enum": ["wechat", "moments", "call", "email"]
+          },
+          "scenario": {"type": "string"},
+          "sid": {"type": "string"}
+        }
+      },
+
+      "PrivateSOPResponse": {
+        "type": "object",
+        "properties": {
+          "day": {"type": "string"},
+          "timing": {"type": "string"},
+          "action": {"type": "string"},
+          "channel": {"type": "string"},
+          "compliance_level": {"type": "string"},
+          "recommended_scripts": {
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+          },
+          "rules": {"type": "array", "items": {"type": "string"}},
+          "grade_hint": {"type": "string"},
+          "customer_journey_steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "day": {"type": "string"},
+                "timing": {"type": "string"},
+                "action": {"type": "string"},
+                "compliance_level": {"type": "string"},
+                "scripts": {"type": "object"}
+              }
+            }
+          },
+          "schedule": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "day": {"type": "integer"},
+                "timing": {"type": "string"},
+                "action": {"type": "string"},
+                "channel_priority": {"type": "array", "items": {"type": "string"}}
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "securitySchemes": {
+      "mcpStdio": {
+        "type": "apiKey",
+        "name": "transport",
+        "in": "header",
+        "description": "传输方式: stdio or http"
+      }
+    }
+  },
+
+  "security": [
+    {"mcpStdio": []}
+  ]
+}

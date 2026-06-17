@@ -1,0 +1,72 @@
+{
+  "_comment": "Dify MCP Client Plugin Manifest for Insurance Sales Platform",
+  "plugin_id": "insurance-sales-mcp-plugin",
+  "version": "0.1.0",
+  "name": "Insurance Sales MCP Integration",
+  "description": "Connects Dify ReAct agents to insurance sales MCP server (product query, compliance check, needs assessment, objection handling, SOP execution)",
+  "author": "总指挥协调虾 (OpenClaw Insurance Sales Platform)",
+  "license": "MIT",
+  "type": "mcp_strategy_plugin",
+  "compatibility": {
+    "dify_min_version": "0.6.0",
+    "transport_protocols": ["sse", "http", "stdio"],
+    "langchain_mcp_adapters_pypi": "langchain-mcp-adapters (>=2026-06-09)"
+  },
+  "mcp_server_config": {
+    "server_name": "insurance-sales-mcp",
+    "transport": "sse",
+    "base_url": "http://localhost:18060/sse",
+    "tools": [
+      {
+        "mcp_tool_name": "insurance_product_query",
+        "dify_tool_alias": "保险产品名称与条款查询",
+        "description": "Query Hong Kong insurance products by name/keyword, return coverage details and compliance points"
+      },
+      {
+        "mcp_tool_name": "compliance_check",
+        "dify_tool_alias": "合规检查（保监GL-44）",
+        "description": "Check content against HKIA compliance rules (RL-002, YL-001, etc.), return risk level and violations"
+      },
+      {
+        "mcp_name": "needs_assessment",
+        "dify_tool_alias": "客户需求评估分级",
+        "description": "Assess client needs and assign priority grade (A/B/C), with scoring criteria"
+      },
+      {
+        "mcp_tool_name": "objection_handler",
+        "dify_tool_alias": "异议处理话术生成",
+        "description": "Generate compliant objection handling scripts by category and urgency level"
+      },
+      {
+        "mcp_tool_name": "private_sop_runner",
+        "dify_tool_alias": "私域SOP执行器",
+        "description": "Execute private traffic onboarding SOP (Day-0 to Day-7) with session state tracking"
+      }
+    ]
+  },
+  "integration_method": {
+    "option_a_dify_mcp_client_plugin": {
+      "install": "pip install dify-mcp-client",
+      "config_path": "~/.dify/plugins/mcp_strategy.json",
+      "description": "Use d3f-project/dify-mcp-client (166⭐, stdio/sse/http) as Agent Strategy Plugin"
+    },
+    "option_b_langchain_mcp_adapters": {
+      "install": "pip install langchain-mcp-adapters",
+      "code_example": "from langchain_mcp_adapters.client import connect_mcp_server\nclient = await connect_mcp_server('http', 'localhost:18060')",
+      "description": "Use langchain-ai/langchain-mcp-adapters for LangGraph agent integration"
+    }
+  },
+  "docker_compose_deploy": {
+    "compose_file": "knowledge/sales-skills/mcp/docker-compose.yml",
+    "port_mapping": "18060:18060",
+    "environment": {
+      "SERVER_TRANSPORT": "http",
+      "HTTP_PORT": "18060"
+    }
+  },
+  "compliance_notes": {
+    "data_residency": "PRIVATE_DEPLOYMENT = NONE出境风险. If using Dify cloud, upgrade to self-hosted to avoid data export.",
+    "gl44_alignment": "All insurance product queries and compliance checks run locally or on private server",
+    "red_line": "No cross-border insurance sales via AI tools. All consultations must direct users to Hong Kong境内投保"
+  }
+}

@@ -1,0 +1,1457 @@
+#!/usr/bin/env python3
+"""
+保险咨询销售 MCP Server — R30 v2.0 (Module A)
+=================================================
+协议: Model Context Protocol (stdio模式)
+端口: stdio (由Claude Desktop / Claude CLI / MCP SDK消费)
+版本: 1.1.0 (v2.0 upgrade - R30)
+
+工具列表 (10 tools v2.0):
+  [原有5个]
+  1. insurance_product_query   - 产品条款查询
+  2. compliance_check          - 合规检测（红线+黄线）
+  3. needs_assessment          - 客户需求诊断
+  4. objection_handler         - 异议处理话术生成
+  5. private_sop_runner        - 私域SOP执行器
+  
+  [新增5个 v2.0]
+  6. compliance_rewrite        - 违规内容自动改写（合规修复）
+  7. lifecycle_analyzer        - 客户生命周期分析（D0→D30旅程优化）
+  8. client_crm_tag            - CRM标签同步与分级管理
+  9. multi_turn_dialogue       - 多轮对话上下文管理器
+  10. compliance_trend_analysis - 合规趋势分析 + 违规模式检测
+
+设计思路：
+- 作为保险业务领域的MCP Server，暴露结构化工具供LLM Agent调用
+- 所有返回数据为JSON Schema定义的结构化输出
+- 支持stdio双向通信（messagepack或JSON-RPC）
+- 集成现有CLI v7.1的所有核心逻辑（需求分析/方案匹配/合规/SOP/会话管理）
+
+使用方式:
+  # Claude Desktop配置 (claude_desktop_config.json):
+  {
+    "mcpServers": {
+      "insurance-sales": {
+        "command": "python3",
+        "args": ["/Users/charles/.openclaw/workspace/knowledge/sales-skills/mcp/server.py"]
+      }
+    }
+  }
+
+  # CLI调用:
+  insurance-sales-cli.py mcp-call compliance_check --text "..."
+  
+  # HTTP端点 (需启动server_http_r27.py):
+  POST http://localhost:18060/mcp
+"""
+
+import sys
+import json
+import os
+import re
+import time
+from enum import Enum
+from typing import Any, Dict, List, Optional
+from datetime import datetime
+
+# ============================================================
+# MCP Protocol Helpers
+# ============================================================
+
+class JSONRPCMessage:
+    """JSON-RPC 2.0 message abstraction"""
+    def __init__(self, method=None, params=None, id=None, result=None, error=None):
+        self.method = method
+        self.params = params or {}
+        self.id = id
+        self.result = result
+        self.error = error
+
+    def to_dict(self) -> dict:
+        msg: Dict[str, Any] = {"jsonrpc": "2.0"}
+        if self.id is not None:
+            msg["id"] = self.id
+        if self.method:
+            msg["method"] = self.method
+        if self.params:
+            msg["params"] = self.params
+        if self.result is not None:
+            msg["result"] = self.result
+        if self.error is not None:
+            msg["error"] = self.error
+        return msg
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, separators=(',', ':')) + "\n"
+
+
+# ============================================================
+# 数据模型（复用CLI v6.1核心逻辑）
+# ============================================================
+
+class CustomerGrade(str, Enum):
+    A = "A"
+    B = "B"
+    C = "C"
+    D = "D"
+
+class Urgency(str, Enum):
+    URGENT = "urgent"
+    WARM = "warm"
+    COLD = "cold"
+
+class ComplianceStatus(str, Enum):
+    PASS = "PASS"
+    FLAGGED = "FLAGGED"
+    BLOCKED = "BLOCKED"
+
+# ============================================================
+# R30 v2.0: 全局会话内存（stdio模式下的多轮状态）
+# ============================================================
+class _SessionStore:
+    """In-process session store for multi-turn dialogue (R30 v2.0)."""
+    def __init__(self):
+        self.sessions: Dict[str, dict] = {}
+        self.compliance_history: List[dict] = []
+        self._lock = False  # stdio is single-threaded
+
+_session_store = _SessionStore()
+
+# R30 v2.0: 合规改写字典 (rule_id → compliant_alternatives)
+COMPLIANCE_REWRITE_DB = {
+    "RL-001": {"bad": ["最高赔付", "保额可达", "最高可保"], "good": ["依合同约定给付保险金", "可获保障金额取决于保单条款"]},
+    "RL-002": {"bad": ["年化.*%", "保本保息", "稳赚", "回报率", "收益率", "保证回报"], "good": ["长期锁定确定性现金流", "按合同约定分配收益"]},
+    "RL-003": {"bad": ["大陆.*不如", "内地.*差", "相比香港.*优势"], "good": ["港陆保障制度各有特点", "两地制度差异可通过专业顾问解读"]},
+    "RL-004": {"bad": ["内地客户专享", "仅限大陆", "大陆专属", "全国发售"], "good": ["适合有跨境保障需求的客户", "全球身份均可适用"]},
+    "RL-005": {"bad": ["最快.*天", "即时赔付", "秒赔", "当天到账"], "good": ["依合同约定期限办理理赔", "理赔时效依保单条款执行"]},
+    "RL-007": {"bad": ["内地可线上办理", "跨境投保最简单"], "good": ["须于香港境内完成投保流程", "具体流程由持牌中介人指导"]},
+    "RL-008": {"bad": ["资金自由进出", "无需资金来源声明"], "good": ["资金来源合规需备妥证明文件", "依HKMA反洗钱要求需提供来源证明"]},
+    "RL-009": {"bad": ["赶在新规前上车", "最后一波.*佣金"], "good": ["建议根据自身需求做合理规划", "不受时间压力影响做出决策"]},
+}
+
+
+# ============================================================
+# 工具1: insurance_product_query
+# ============================================================
+
+def load_product_db():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(script_dir)
+    db_path = os.path.join(parent_dir, "cli", "product-clauses-db.json")
+    try:
+        with open(db_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("products", [])
+    except FileNotFoundError:
+        # Fallback to MCP dir
+        db_path_mcp = os.path.join(script_dir, "..", "cli", "product-clauses-db.json")
+        with open(db_path_mcp, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("products", [])
+
+
+def _fuzzy_match_product(query: str, products: list) -> Optional[dict]:
+    query_lower = query.lower().strip()
+    for p in products:
+        if p["name_cn"] == query or p["id"].lower() == query_lower:
+            return p
+    candidates = []
+    for p in products:
+        name = p["name_cn"].lower()
+        en_name = p.get("name_en", "").lower()
+        if query_lower in name or query_lower in en_name:
+            score = 3 if query_lower == name else 1
+            candidates.append((score, p))
+    for p in products:
+        en_short = "".join([c[0] for c in p.get("name_en", "").split() if c.isalpha()]).lower()
+        if query_lower == en_short:
+            candidates.append((2, p))
+    # Char-level overlap (for synonyms like 危疾 vs 重疾险)
+    if not candidates and query_lower:
+        for p in products:
+            name = p["name_cn"]
+            overlaps = sum(1 for ch in query_lower if ch.lower() in name.lower())
+            threshold = max(2, len(query) // 2)
+            # For very short queries (≤2 chars), accept partial overlap
+            if len(query) <= 2:
+                threshold = max(1, threshold - 1)
+            if overlaps >= threshold:
+                candidates.append((1, p))
+    if candidates:
+        candidates.sort(key=lambda x: -x[0])
+        return candidates[0][1]
+    return None
+
+
+# ============================================================
+# 工具2: compliance_check (复用CLI v6.1完整规则)
+# ============================================================
+
+RED_LINE_RULES = [
+    {"rule_id": "RL-001", "name": "产品宣传禁则", "pattern": r"(最高赔付|保额可达|最高可保)", "severity": "CRITICAL", "suggestion": "改为'依合同约定给付保险金'"},
+    {"rule_id": "RL-002", "name": "收益承诺禁则", "pattern": r"(年化.*%|保本保息|稳赚|回报率|收益率|保证回报)", "severity": "CRITICAL", "suggestion": "改为'长期锁定确定性现金流'"},
+    {"rule_id": "RL-003", "name": "贬低同业禁则", "pattern": r"(大陆.*不如|内地.*差|相比香港.*优势|香港比大陆)", "severity": "CRITICAL", "suggestion": "改为客观描述港陆制度差异(不评判优劣)"},
+    {"rule_id": "RL-004", "name": "内地招揽禁则", "pattern": r"(内地客户专享|仅限大陆|大陆专属|全国发售|面向国内)", "severity": "CRITICAL", "suggestion": "改为中性表述,不区分地域"},
+    {"rule_id": "RL-005", "name": "理赔速度承诺", "pattern": r"(最快.*天|即时赔付|秒赔|当天到账|闪电理赔)", "severity": "CRITICAL", "suggestion": "改为'依合同约定期限办理理赔'"},
+    {"rule_id": "RL-006", "name": "具体产品名+保额组合", "pattern": r"([a-zA-Z\u4e00-\u9fa5]+保险).*(\d{3,}\s*万|百万)", "severity": "HIGH", "suggestion": "移除具体产品名与保额的组合表述"},
+    {"rule_id": "RL-007", "name": "内地推介禁则", "pattern": r"(内地客户专享|全国发售|面向国内|仅限大陆|跨境投保最简单|内地可线上办理)", "severity": "CRITICAL", "suggestion": "移除地域限定词,改为'适合有跨境保障需求的客户'"},
+    {"rule_id": "RL-008", "name": "资金来源虚假声明", "pattern": r"(资金自由进出|无需资金来源声明|跨境资金不受限|资金随意调拨)", "severity": "CRITICAL", "suggestion": "改为'资金来源合规需备妥证明文件'"},
+    {"rule_id": "RL-009", "name": "佣金新规催单禁则", "pattern": r"(赶在新规前上车|最后一波.*佣金|最后一波.*优惠|限时高返佣)", "severity": "CRITICAL", "suggestion": "改为'建议根据自身需求做合理规划,不受时间压力影响'"},
+    {"rule_id": "RL-010", "name": "跨境政策不确定性禁则", "pattern": r"(深圳.*子公司.*即将开业|跨境资金结算.*更便利|深港互通.*无跨境限制|内地医疗直连.*已实现|资金不受5万美金限制)", "severity": "CRITICAL", "suggestion": "改为'相关政策在持续优化中,具体以官方公告为准'"},
+]
+
+YELLOW_LINE_RULES = [
+    {"rule_id": "YL-001", "name": "避免绝对化用语", "pattern": r"(一定|肯定|绝对|100%.*[能够]|永远)", "severity": "MEDIUM", "suggestion": "改为'通常情况下''依合同约定'"},
+    {"rule_id": "YL-002", "name": "避免制造焦虑/紧迫感", "pattern": r"(不买就后悔|最后机会|限时优惠|错过等一年|即将截止|仅剩.*)", "severity": "MEDIUM", "suggestion": "改为中性描述,尊重客户自主决策"},
+    {"rule_id": "YL-003", "name": "赴港投保流程规范缺失", "pattern": r"(线上办理|无需面签|远程投保|大陆可办)", "severity": "MEDIUM", "suggestion": "补充'须于香港境内完成投保流程',不可暗示简化"},
+    {"rule_id": "YL-005", "name": "GN16利益区分缺失", "pattern": r"(总收益包含演示利益|未区分.*非保证|仅展示.*演示|不分.*利益)", "severity": "MEDIUM", "suggestion": "补充'请区分保证利益与非保证利益,实际收益依保险公司年度分红决定'"},
+]
+
+REGULATORY_REFS = {
+    "RL-001": "GL-44《保险中介人准则》§5.2 - 不得作不实或误导性陈述",
+    "RL-002": "银保监〔2019〕39号文 - 禁止承诺不确定收益",
+    "RL-003": "GL-44 §8.3 - 禁止贬低同业或其他中介机构",
+    "RL-004": "《保险法》第8条 + 保监会跨境业务监管规定",
+    "RL-005": "GL-44 §5.2 - 不得作不实理赔承诺",
+    "RL-006": "GL-44 §4.1 - 产品宣传须完整透明",
+    "RL-007": "保监局跨境销售监管(2026-06-01通报) + 《保险法》第8条",
+    "RL-008": "HKMA反洗钱要求 + 投资账户资金来源声明规定(2026-05)",
+    "RL-009": "保监局分红保单佣金新规(2026年1月,首年上限70%)",
+    "RL-010": "保监局访客定义更新 + 深圳保险北上政策(2026) - 不可承诺确定性",
+    "YL-001": "GL-44 §5.2 精神 - 避免过度确定性表述引发误解",
+    "YL-002": "《保险营销管理办法》- 禁止使用不当销售手段",
+    "YL-003": "保监局赴港投保流程要求(2026-06-01通报)",
+    "YL-005": "GN16(2026.3.31生效) + 指引34 - 保证/非保证利益区分",
+}
+
+
+# ============================================================
+# 工具3: needs_assessment (复用CLI需求分析+权重评分)
+# ============================================================
+
+NEED_KEYWORDS = {
+    "health_concern": ["生病", "癌症", "重疾", "心脏病", "肿瘤", "确诊", "体检异常"],
+    "medical_need": ["住院", "报销", "医保不够", "自费", "特需", "私立医院", "手术费"],
+    "income_protection": ["收入", "工作没了", "失业", "房贷", "养家", "家人生活", "生活费"],
+    "family_responsibility": ["家人", "孩子教育", "父母养老", "留爱不留债", "家庭支柱"],
+    "travel_fear": ["旅游", "出差", "海外", "境外医疗", "救援", "国际就医"],
+    "savings_plan": ["储蓄", "理财", "养老", "退休", "教育金", "资产配置", "资金安全"],
+    "property_risk": ["火灾", "漏水", "盗窃", "家财", "物业损坏", "财产"],
+    "cross_border": ["内地", "跨境", "大湾区", "海归", "外籍", "海外身份"],
+    "elderly_care": ["老年", "高龄", "年纪大", "买不了保险", "既往症"],
+}
+
+
+# ============================================================
+# 工具4: objection_handler (复用CLI异议话术)
+# ============================================================
+
+def load_objection_db():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(script_dir)
+    db_path = os.path.join(parent_dir, "cli", "objection-scripts-db.json")
+    try:
+        with open(db_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("objection_scripts", [])
+    except FileNotFoundError:
+        db_mcp = os.path.join(script_dir, "..", "cli", "objection-scripts-db.json")
+        with open(db_mcp, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("objection_scripts", [])
+
+
+def _fuzzy_match_objection(query_category: str, query_scenario: str, scripts: list) -> Optional[dict]:
+    candidates = []
+    for s in scripts:
+        if query_category and s.get("category") != query_category:
+            continue
+        scene_score = 0
+        if query_scenario:
+            scenario_text = (s.get("scenario", "") + s.get("scenario_cn", "")).lower()
+            q_lower = query_scenario.lower()
+            if q_lower in scenario_text:
+                scene_score += 10
+            else:
+                words = q_lower.split() if ' ' in q_lower else [q_lower]
+                for word in words:
+                    if len(word) >= 2 and word in scenario_text:
+                        scene_score += 3
+        else:
+            scene_score = 1
+        candidates.append((scene_score, s))
+    if candidates:
+        candidates.sort(key=lambda x: -x[0])
+        return candidates[0][1]
+    return None
+
+
+# ============================================================
+# 工具5: private_sop_runner (复用CLI SOP)
+# ============================================================
+
+DAY_SEQUENCES = {
+    "Day-0": {"timing": "0-2h内", "action": "welcome_message", "channels": ["wechat"], "compliance_level": "low_risk", "scripts": {"standard": "您好！感谢添加。我是XX保险经纪顾问，专注于香港保险制度解读与家庭保障规划。有任何问题随时找我～", "casual": "哈喽！终于加上了😊 我平时主要做香港保险的科普分享，有相关问题欢迎随时问我～"}, "rules": ["首条消息不推产品", "自我介绍需含'保险经纪顾问'身份标识"]},
+    "Day-1": {"timing": "24h触发", "action": "content_nurture", "channels": ["wechat", "moments"], "compliance_level": "low_risk", "scripts": {"educate_gn16": "最近很多客户问香港保险新规GN16，我整理了一份解读摘要。纯科普，不涉及任何产品推荐：[资料链接]", "family_risk": "昨天有个客户问我'房贷+孩子=风险敞口多大'，做个简单测评或许对您有帮助：[测评链接]"}, "rules": ["内容必须标注'科普/教育目的'", "不得暗示购买紧迫感"]},
+    "Day-3": {"timing": "72h触发", "action": "needs_discovery", "channels": ["wechat"], "compliance_level": "medium_risk", "scripts": {"standard": "上次分享的资料还看得明白吗？如果您有具体的保障需求，我可以帮您做个初步梳理，不涉及任何产品推荐。"}, "rules": ["使用开放式问题引导", "不得预设客户有购买意向", "可提及'初步梳理'但必须声明非销售"]},
+    "Day-5": {"timing": "120h触发", "action": "solution_education", "channels": ["wechat", "call"], "compliance_level": "medium_risk", "scripts": {"standard": "根据您的情况，市面上比较适合的保障框架大概有三种类型。我先帮您列一个对比框架（不涉及具体公司/产品）：[框架表链接]"}, "rules": ["仅对B级以上客户执行", "用'框架类型'而非产品名", "必须同步展示保证利益与非保证利益的区分原则(GN16)"]},
+    "Day-7": {"timing": "168h触发", "action": "cta_or_reactivate", "channels": ["wechat", "call"], "compliance_level": "high_risk", "scripts": {"standard_cta": "如果您觉得初步梳理有帮助，可以预约一次15分钟的电话沟通。纯需求了解，没有任何推销压力。", "reactivation_cold": "最近香港保险市场有不少新动态，想跟您分享一下是否有参考价值？"}, "rules": ["最多触发3次CTA，之后停止主动触达", "不得制造'限时优惠'等虚假紧迫感"]},
+}
+
+CHANNEL_PRIORITY = {
+    "wechat": {"priority": 1, "open_rate": "~85%", "compliance_risk": "low"},
+    "moments": {"priority": 2, "open_rate": "~60%", "compliance_risk": "low"},
+    "call": {"priority": 3, "open_rate": "~40%", "compliance_risk": "medium"},
+    "email": {"priority": 4, "open_rate": "~25%", "compliance_risk": "high"},
+}
+
+
+# ============================================================
+# MCP Tool Definitions (JSON Schema)
+# ============================================================
+
+MCP_TOOLS = [
+    {
+        "name": "insurance_product_query",
+        "description": "查询香港保险产品条款摘要。支持列出所有产品、模糊搜索产品详情，返回保障范围、免责条款、合规要点等结构化数据。适用于为客户做方案前的产品信息准备。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "detail"],
+                    "description": "操作类型: list=列出所有产品, detail=查询产品详情"
+                },
+                "product_name": {
+                    "type": "string",
+                    "description": "产品名称（detail时必需，支持模糊匹配如'重疾''医疗'）"
+                }
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "compliance_check",
+        "description": "合规检测引擎：对保险销售话术/文案执行14条红线规则+4条黄线规则的自动化扫描。返回违规详情、建议改写方案、引用的监管法规。BLOCKED=禁止发布, FLAGGED=需人工审查, PASS=通过。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "待检测的完整文本内容"
+                },
+                "strict_mode": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "严格模式：启用更多隐式违规检测规则"
+                }
+            },
+            "required": ["text"]
+        }
+    },
+    {
+        "name": "needs_assessment",
+        "description": "客户需求诊断引擎。从用户消息中提取风险需求信号，评估客户分级(A/B/C/D)，判断紧迫度(urgent/warm/cold)，推荐对应方案框架和合规话术。输出JSON结构化结果可直接用于下游Agent路由。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "用户原始消息/需求描述"
+                },
+                "context_history": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "历史对话上下文（可选，用于多轮需求演化分析）"
+                }
+            },
+            "required": ["message"]
+        }
+    },
+    {
+        "name": "objection_handler",
+        "description": "异议处理话术生成器。内置价格/信任/拖延/对比/可信度/范围6大类异议场景，每个场景3层级话术(light/medium/heavy)。返回结构化话术含tone、script、适用场景说明。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["price", "trust", "delay", "compare", "credibility", "scope"],
+                    "description": "异议类型分类"
+                },
+                "scenario": {
+                    "type": "string",
+                    "description": "具体场景关键词（用于精确匹配）"
+                },
+                "tier": {
+                    "type": "string",
+                    "enum": ["light", "medium", "heavy"],
+                    "default": "medium",
+                    "description": "话术层级: light=轻量回应, medium=标准话术, heavy=深入处理"
+                },
+                "list_all": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "如为true，列出所有异议场景而非生成话术"
+                }
+            }
+        }
+    },
+    {
+        "name": "private_sop_runner",
+        "description": "私域SOP执行器。管理Day-0至Day-7客户跟进全流程，含触达时机、话术模板、合规规则、渠道优先级矩阵。支持生成某日SOP、模拟7天旅程、查询客户日程。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["day-sequence", "customer-journey", "get-schedule"],
+                    "description": "操作类型"
+                },
+                "day": {
+                    "type": "integer",
+                    "description": "目标天数(Day-0到Day-7)"
+                },
+                "grade": {
+                    "type": "string",
+                    "enum": ["A", "B", "C", "D"],
+                    "description": "客户分级"
+                },
+                "channel": {
+                    "type": "string",
+                    "enum": ["wechat", "moments", "call", "email"],
+                    "description": "触达渠道"
+                },
+                "scenario": {
+                    "type": "string",
+                    "description": "客户场景（customer-journey使用）"
+                },
+                "sid": {
+                    "type": "string",
+                    "description": "会话ID（get-schedule使用）"
+                }
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "compliance_rewrite",
+            "description": "违规内容自动改写引擎。对含违规词的销售话术/文案执行自动合规修复，返回改写前后对比、改动说明、二次验证结果。支持指定目标规则ID精准修复。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "待改写的原文本"},
+                    "target_rules": {"type": "array", "items": {"type": "string"}, "description": "目标规则ID列表(空=自动检测所有违规)"}
+                },
+                "required": ["text"]
+            }
+        },
+        {
+            "name": "lifecycle_analyzer",
+            "description": "客户生命周期分析引擎。D0→D30全阶段旅程管理，含认知/信任/方案/决策/转化5阶段模型。支持现状分析、优化策略推荐、内容方向建议。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["analyze", "get_stages", "optimize"]},
+                    "last_touch_day": {"type": "integer", "description": "上次触达距今天数"},
+                    "customer_grade": {"type": "string", "enum": ["A", "B", "C", "D"]},
+                    "engagement_score": {"type": "number", "description": "互动评分(0-1)"}
+                },
+                "required": ["action"]
+            }
+        },
+        {
+            "name": "client_crm_tag",
+            "description": "CRM标签同步与分级管理。为会话客户生成多维度标签(risk_profile/purchase_intent/compliance_flag/lifecycle_stage)，支持查询、导出。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["generate", "query", "export_all", "categorize_tags"]},
+                    "session_id": {"type": "string", "description": "会话ID"},
+                    "customer_grade": {"type": "string", "enum": ["A", "B", "C", "D"]},
+                    "needs_detected": {"type": "array", "items": {"type": "string"}},
+                    "engagement_score": {"type": "number"},
+                    "compliance_status": {"type": "string", "enum": ["PASS", "FLAGGED", "BLOCKED"]}
+                },
+                "required": ["action"]
+            }
+        },
+        {
+            "name": "multi_turn_dialogue",
+            "description": "多轮对话上下文管理器。在stdio模式下管理会话级状态追踪(80轮窗口)，支持创建/添加轮次/获取上下文/生成摘要/删除会话。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "add_turn", "get_context", "summarize", "list_sessions", "delete"]},
+                    "session_id": {"type": "string"},
+                    "content": {"type": "string"},
+                    "grade": {"type": "string", "enum": ["A", "B", "C", "D"]}
+                },
+                "required": ["action"]
+            }
+        },
+        {
+            "name": "compliance_trend_analysis",
+            "description": "合规趋势分析引擎。分析历史合规检查记录，发现高频违规词/模式，评估风险等级，生成改进建议。支持单条记录、规则统计查询。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["analyze", "record", "get_rule_stats"]},
+                    "session_id": {"type": "string"},
+                    "status": {"type": "string", "enum": ["PASS", "FLAGGED", "BLOCKED"]}
+                },
+                "required": ["action"]
+            }
+        }
+    ]
+
+
+# ============================================================
+# MCP Server Core (stdio-based JSON-RPC)
+# ============================================================
+
+def build_tools_list():
+    """构建MCP tools列表响应 (v2.0 - 10 tools)"""
+    return {"tools": MCP_TOOLS}
+
+
+def handle_insurance_product_query(params: dict) -> dict:
+    """Tool 1: 产品条款查询"""
+    action = params.get("action")
+    products = load_product_db()
+
+    if action == "list":
+        output = {
+            "products_compared": len(products),
+            "products": [
+                {"id": p["id"], "name_cn": p["name_cn"], "insurance_type": p["insurance_type"],
+                 "category": p["category"], "coverage_summary": p["coverage_summary"][:100] + "..."}
+                for p in products
+            ],
+            "usage_hint": "使用 detail action + product_name 查询详情"
+        }
+    elif action == "detail":
+        product = _fuzzy_match_product(params.get("product_name", ""), products)
+        if not product:
+            return {"error": "product_not_found", "available_products": [p["name_cn"] for p in products]}
+        output = {
+            "id": product["id"], "name_cn": product["name_cn"],
+            "insurance_type": product["insurance_type"], "category": product["category"],
+            "coverage_summary": product["coverage_summary"],
+            "detailed_coverage": product.get("detailed_coverage", "详见条款说明"),
+            "exclusions": product["exclusions"],
+            "suitable_for": product["suitable_for"],
+            "compliance_points": product.get("compliance_points", ["依合同约定给付保险金", "不得承诺收益"]),
+            "common_questions": [q for q in product.get("common_questions", [])],
+            "regulatory_refs": product.get("regulatory_refs", []),
+        }
+    else:
+        output = {"error": "invalid_action", "available_actions": ["list", "detail"]}
+
+    return {"result": output}
+
+
+def handle_compliance_check(params: dict) -> dict:
+    """Tool 2: 合规检测"""
+    text = params.get("text", "")
+    strict_mode = params.get("strict_mode", False)
+
+    violations = []
+
+    # 红线扫描
+    for rule in RED_LINE_RULES:
+        matches = re.findall(rule["pattern"], text, re.IGNORECASE)
+        if matches:
+            violations.append({
+                "rule_id": rule["rule_id"],
+                "name": rule["name"],
+                "severity": rule["severity"],
+                "matched_text": matches[0],
+                "suggestion": rule["suggestion"],
+                "regulatory_ref": REGULATORY_REFS.get(rule["rule_id"], "")
+            })
+
+    # 黄线扫描
+    for rule in YELLOW_LINE_RULES:
+        matches = re.findall(rule["pattern"], text, re.IGNORECASE)
+        if matches:
+            violations.append({
+                "rule_id": rule["rule_id"],
+                "name": rule["name"],
+                "severity": "MEDIUM",
+                "matched_text": matches[0],
+                "suggestion": rule["suggestion"],
+                "regulatory_ref": REGULATORY_REFS.get(rule["rule_id"], "")
+            })
+
+    # 严格模式额外规则
+    if strict_mode:
+        hidden_patterns = [
+            ("RL-011", "隐式收益暗示", r"(投资回报|资产增值|财富增值)", "MEDIUM", "改为'财务规划工具'"),
+        ]
+        for rid, name, pat, sev, sug in hidden_patterns:
+            if re.search(pat, text):
+                violations.append({
+                    "rule_id": rid, "name": name, "severity": sev,
+                    "matched_text": f"[严格模式触发]",
+                    "suggestion": sug
+                })
+
+    # 状态判定
+    has_critical = any(v["severity"] == "CRITICAL" for v in violations)
+    has_high = any(v["severity"] == "HIGH" for v in violations)
+
+    if has_critical:
+        status = ComplianceStatus.BLOCKED.value
+    elif has_high:
+        status = ComplianceStatus.FLAGGED.value
+    else:
+        status = ComplianceStatus.PASS.value
+
+    return {
+        "result": {
+            "compliance_status": status,
+            "violations_found": len(violations),
+            "violation_details": violations,
+            "red_line_count": len([v for v in violations if v["severity"] == "CRITICAL"]),
+            "yellow_line_count": len([v for v in violations if v["severity"] == "MEDIUM"]),
+            "rule_coverage": {"red_lines": len(RED_LINE_RULES), "yellow_lines": len(YELLOW_LINE_RULES)},
+        }
+    }
+
+
+def handle_needs_assessment(params: dict) -> dict:
+    """Tool 3: 客户需求诊断"""
+    message = params.get("message", "")
+    context_history = params.get("context_history", [])
+    
+    signals = {}
+    lower_msg = message.lower()
+
+    # 结合历史对话上下文（多轮需求演化）
+    for hist in context_history:
+        lower_msg += " " + hist.lower()
+
+    for need_type, keywords in NEED_KEYWORDS.items():
+        matched = [kw for kw in keywords if kw in lower_msg]
+        if matched:
+            confidence = min(0.9, 0.5 + 0.2 * len(matched))
+            signals[need_type] = {"need_type": need_type, "confidence": round(confidence, 2), "keywords_matched": matched}
+
+    # 排序取Top-3
+    sorted_signals = sorted(signals.values(), key=lambda x: x["confidence"], reverse=True)[:3]
+
+    # 客户分级（增强版：更精准的关键词映射）
+    need_types = {s["need_type"] for s in sorted_signals}
+    
+    # 检测额外隐含信号
+    lower_msg = message.lower()
+    if not signals.get("health_concern"):
+        health_keywords = ["结节", "囊肿", "血压高", "血糖高", "脂肪肝", "尿酸", "息肉", "炎症"]
+        for kw in health_keywords:
+            if kw in lower_msg:
+                signals["health_concern"] = {"need_type": "health_concern", "confidence": 0.5, "keywords_matched": [kw]}
+                sorted_signals = sorted(signals.values(), key=lambda x: x["confidence"], reverse=True)[:3]
+                need_types.add("health_concern")
+    
+    if not signals.get("medical_need"):
+        medical_keywords = ["体检", "验血", "抽血", "挂号", "医生", "门诊", "住院"]
+        for kw in medical_keywords:
+            if kw in lower_msg:
+                signals["medical_need"] = {"need_type": "medical_need", "confidence": 0.45, "keywords_matched": [kw]}
+    
+    need_types = {s["need_type"] for s in sorted_signals}  # recompute
+    
+    # 默认分级
+    grade = CustomerGrade.D.value
+    
+    # 分级逻辑（修正版）
+    health_related = bool(need_types & {"health_concern", "medical_need"})
+    income_family = bool(need_types & {"income_protection", "family_responsibility"})
+    cross_border_flag = bool(need_types & {"cross_border"}) or any(kw in lower_msg for kw in ["内地","跨境","大湾区","海归"])
+    
+    if health_related and income_family:
+        grade = CustomerGrade.A.value
+    elif (health_related and len(sorted_signals) >= 2) or cross_border_flag:
+        grade = CustomerGrade.A.value
+    elif income_family or health_related:
+        grade = CustomerGrade.B.value
+    elif "travel_fear" in need_types or "savings_plan" in need_types:
+        grade = CustomerGrade.C.value
+    else:
+        grade = CustomerGrade.D.value
+
+    # 紧迫度
+    urgent_kw = ["马上", "着急", "最近", "刚发现", "担心", "焦虑", "怎么办"]
+    warm_kw = ["考虑", "想咨询", "打算", "了解", "计划"]
+    if any(kw in lower_msg for kw in urgent_kw):
+        urgency = Urgency.URGENT.value
+    elif any(kw in lower_msg for kw in warm_kw):
+        urgency = Urgency.WARM.value
+    else:
+        urgency = Urgency.COLD.value
+
+    need_names = {
+        "health_concern": "健康风险", "medical_need": "医疗保障",
+        "income_protection": "收入保护", "family_responsibility": "家庭责任",
+        "travel_fear": "跨境/境外医疗", "savings_plan": "储蓄养老规划",
+        "property_risk": "财产保障", "cross_border": "跨境保险需求",
+        "elderly_care": "老年保障"
+    }
+
+    product_recommendation = None
+    if grade in ['A', 'B']:
+        primary = sorted_signals[0]["need_type"] if sorted_signals else ""
+        PRODUCT_MAP = {
+            "health_concern": {"core": "重疾险", "compliant_desc": "确诊合同约定的疾病后,一次性给付保险金"},
+            "medical_need": {"core": "医疗险", "compliant_desc": "补充社保报销范围之外的高额医疗费用"},
+            "income_protection": {"core": "定期寿险", "compliant_desc": "保障期内因身故/全残给付保险金"},
+            "family_responsibility": {"core": "定期寿险+重疾险组合", "compliant_desc": "构建家庭财务安全网"},
+            "travel_fear": {"core": "全球医疗险", "compliant_desc": "覆盖全球医疗机构的医疗费用"},
+            "savings_plan": {"core": "年金险", "compliant_desc": "通过长期储蓄型产品锁定确定性"},
+            "cross_border": {"core": "全球医疗险", "compliant_desc": "跨境身份人群的保障规划"},
+        }
+        prod = PRODUCT_MAP.get(primary, {})
+        product_recommendation = {
+            "core_product": prod.get("core", "待定"),
+            "action": "consultation_booking" if grade in ['A', 'B'] else "content_nurture"
+        }
+
+    return {
+        "result": {
+            "detected_needs": sorted_signals,
+            "customer_grade": grade,
+            "urgency": urgency,
+            "product_recommendation": product_recommendation,
+            "needs_summary": f"检测到{len(sorted_signals)}个风险信号: {', '.join(need_names.get(s['need_type'], s['need_type']) for s in sorted_signals) if sorted_signals else '无明确信号'}",
+            "context_enhanced": len(context_history) > 0,
+            "context_turns_considered": len(context_history),
+        }
+    }
+
+
+def handle_objection_handler(params: dict) -> dict:
+    """Tool 4: 异议处理话术生成"""
+    scripts = load_objection_db()
+
+    if not scripts:
+        return {"error": "objection_db_not_found"}
+
+    action_list = params.get("list_all", False)
+    
+    if action_list:
+        by_cat = {}
+        for s in scripts:
+            cat = s["category"]
+            by_cat.setdefault(cat, []).append({"scenario": s["scenario"], "scenario_cn": s["scenario_cn"]})
+        return {
+            "result": {
+                "action": "list_all_scenarios",
+                "total_scenarios": len(scripts),
+                "categories": by_cat,
+                "tier_options": ["light", "medium", "heavy"]
+            }
+        }
+
+    category = params.get("category")
+    scenario = params.get("scenario", "")
+    tier = params.get("tier", "medium")
+
+    matched = _fuzzy_match_objection(category, scenario, scripts)
+    
+    if not matched:
+        return {
+            "error": "no_matching_scenario",
+            "suggestion": f"请提供准确的异议类型或场景关键词",
+            "available_categories": list({s["category"] for s in scripts})
+        }
+
+    tier_data = None
+    for t in matched.get("tier_levels", []):
+        if t["level"] == tier:
+            tier_data = t
+            break
+    if not tier_data and matched.get("tier_levels"):
+        tier_data = matched["tier_levels"][0]
+
+    return {
+        "result": {
+            "category": matched["category"],
+            "scenario_en": matched.get("scenario", ""),
+            "scenario_cn": matched.get("scenario_cn", ""),
+            "tier_requested": tier,
+            "tone": tier_data.get("tone", "professional") if tier_data else "unknown",
+            "script": tier_data.get("script", "") if tier_data else "",
+            "full_tier_options": [{"level": t["level"], "tone": t["tone"], "script": t["script"]}
+                                  for t in matched.get("tier_levels", [])]
+        }
+    }
+
+
+def handle_private_sop_runner(params: dict) -> dict:
+    """Tool 5: 私域SOP执行器"""
+    action = params.get("action")
+
+    if action == "day-sequence":
+        day_num = int(params.get("day", 3))
+        key = f"Day-{min(day_num, 7)}"
+        grade = params.get("grade", "B")
+        channel = params.get("channel", "wechat")
+
+        seq = DAY_SEQUENCES.get(key)
+        if not seq:
+            return {"error": "invalid_day", "available_days": list(DAY_SEQUENCES.keys())}
+        
+        if channel not in seq["channels"]:
+            return {
+                "error": "channel_not_available_for_day",
+                "requested_channel": channel,
+                "available_channels": seq["channels"]
+            }
+
+        return {
+            "result": {
+                "day": key, "timing": seq["timing"], "action": seq["action"],
+                "channel": channel, "compliance_level": seq["compliance_level"],
+                "recommended_scripts": seq["scripts"], "rules": seq["rules"],
+                "grade_hint": f"Grade {grade}客户适用" if grade in ['A','B'] else "纯科普引导"
+            }
+        }
+
+    elif action == "customer-journey":
+        grade = params.get("grade", "A")
+        scenario = params.get("scenario")
+        
+        journey = []
+        for d in range(8):
+            dn = min(d, 7)
+            key = f"Day-{dn}" if dn < 7 else "Day-7-final"
+            action_type = ["welcome_add","content_nurture","needs_discovery","solution_or_cta","final_followup"][min(d//2, 4)]
+            journey.append({"day": f"D{d}", "action": action_type, "compliance_level": DAY_SEQUENCES.get(key,{}).get("compliance_level")})
+
+        result = {
+            "simulation": "7-day_journey", "customer_grade": grade,
+            "total_touchpoints": 8, "journey": journey,
+            "compliance_warnings": [
+                "D0-D1: 不得提及具体产品/收益", "D3: 必须声明'非销售'",
+                "D5+: B级以上才可用方案框架话术", "D7: CTA最多3次，之后静默"
+            ]
+        }
+        if scenario:
+            result["scenario"] = scenario
+        return {"result": result}
+
+    elif action == "get-schedule":
+        sid = params.get("sid")
+        if not sid:
+            return {"error": "session_id_required"}
+        
+        schedule = []
+        for dn in range(8):
+            key = f"Day-{min(dn,7)}"
+            schedule.append({
+                "day": key,
+                "action": DAY_SEQUENCES.get(key,{}).get("action","final_followup"),
+                "compliance_level": DAY_SEQUENCES.get(key,{}).get("compliance_level","high_risk")
+            })
+
+        return {
+            "result": {
+                "session_id": sid,
+                "schedule": schedule,
+                "channel_priority_matrix": CHANNEL_PRIORITY,
+                "next_action_required": schedule[0]
+            }
+        }
+
+    return {"error": "invalid_action", "available_actions": ["day-sequence", "customer-journey", "get-schedule"]}
+
+
+# ============================================================
+# MCP Message Router
+# ============================================================
+
+def handle_initialize() -> dict:
+    return {
+        "protocolVersion": "2024-11-05",
+        "capabilities": {"tools": {"listChanged": True}},
+        "serverInfo": {"name": "insurance-sales-mcp", "version": "1.1.0"},
+    }
+
+
+def handle_tools_list() -> dict:
+    return build_tools_list()
+
+
+# ============================================================
+# R30 v2.0: 新增工具 6 - compliance_rewrite (违规内容自动改写)
+# ============================================================
+
+def handle_compliance_rewrite(params: dict) -> dict:
+    """Tool 6: 合规改写引擎。
+    输入：原文本 + 可选的目标规则ID
+    输出：改写后的合规文本 + 改动说明 + 原始违规引用
+    """
+    text = params.get("text", "")
+    target_rules = params.get("target_rules", [])  # 空=自动检测所有违规
+    
+    if not text:
+        return {"error": "text_required"}
+    
+    # Step 1: 先做合规检测找出违规
+    violations = []
+    for rule in RED_LINE_RULES + YELLOW_LINE_RULES:
+        matches = re.findall(rule["pattern"], text, re.IGNORECASE)
+        if matches:
+            rule_id = rule["rule_id"]
+            if target_rules and rule_id not in target_rules:
+                continue
+            violations.append({
+                "rule_id": rule_id,
+                "severity": rule["severity"],
+                "matched_text": matches[0],
+                "suggestion": rule["suggestion"]
+            })
+    
+    if not violations:
+        return {"result": {"status": "no_violations", "original_text": text, "rewrite_applied": False, "changes": []}}
+    
+    # Step 2: 自动改写
+    rewritten = text
+    changes = []
+    for v in violations:
+        rule_id = v["rule_id"]
+        rewrite_info = COMPLIANCE_REWRITE_DB.get(rule_id)
+        if rewrite_info:
+            for bad_pattern in rewrite_info["bad"]:
+                new_texts = [r for r in rewrite_info["good"] if re.search(bad_pattern, rewritten, re.IGNORECASE)]
+                if new_texts:
+                    old_match = re.search(bad_pattern, rewritten, re.IGNORECASE)
+                    if old_match:
+                        replacement = new_texts[0]
+                        rewritten = re.sub(bad_pattern, replacement, rewritten, count=1, flags=re.IGNORECASE)
+                        changes.append({
+                            "rule_id": rule_id,
+                            "original": old_match.group(0),
+                            "rewritten": replacement,
+                            "action": "auto_rewritten"
+                        })
+    
+    # Step 3: 二次合规验证
+    re_violations = []
+    for rule in RED_LINE_RULES + YELLOW_LINE_RULES:
+        if re.findall(rule["pattern"], rewritten, re.IGNORECASE):
+            re_violations.append(rule["rule_id"])
+    
+    status = "fully_compliant" if not re_violations else "partial_rewrite_needed"
+    
+    return {
+        "result": {
+            "status": status,
+            "original_text": text,
+            "rewritten_text": rewritten,
+            "changes_applied": changes,
+            "changes_count": len(changes),
+            "remaining_violations": re_violations if re_violations else None,
+            "requires_manual_review": status == "partial_rewrite_needed",
+            "rewrite_confidence": 0.95 if not re_violations else 0.7
+        }
+    }
+
+
+# ============================================================
+# R30 v2.0: 新增工具 7 - lifecycle_analyzer (客户生命周期分析)
+# ============================================================
+
+LIFECYCLE_STAGES = {
+    "D0_D1": {"name": "认知阶段", "duration": "0-2天", "goal": "建立信任+品牌认知", "content_type": ["科普内容", "行业解读", "政策解读"], "compliance_level": "LOW", "kpi": ["阅读率>60%", "收藏率>5%"]},
+    "D2_D4": {"name": "信任阶段", "duration": "3-5天", "goal": "需求挖掘+专业度展示", "content_type": ["案例分享(脱敏)", "保险制度解析", "QA互动"], "compliance_level": "LOW-MED", "kpi": ["互动率>10%", "私信转化率>3%"]},
+    "D5_D7": {"name": "方案阶段", "duration": "6-8天", "goal": "方案框架展示+初步匹配", "content_type": ["保障框架对比(无产品名)", "GN16解读", "需求测评工具"], "compliance_level": "MED", "kpi": ["CTA点击率>8%", "预约咨询>2%"]},
+    "D8_D14": {"name": "决策阶段", "duration": "9-15天", "goal": "深度沟通+异议处理", "content_type": ["1v1需求梳理", "方案对比框架", "客户见证(脱敏)"], "compliance_level": "MED-HIGH", "kpi": ["预约率>15%", "咨询转化率>30%"]},
+    "D15_D30": {"name": "转化/维护阶段", "duration": "16-30天", "goal": "促成+关系维护", "content_type": ["保单检视", "理赔案例(脱敏)", "周年回访"], "compliance_level": "HIGH", "kpi": ["转化率>20%", "转介绍率>5%"]}
+}
+
+def handle_lifecycle_analyzer(params: dict) -> dict:
+    """Tool 7: 客户生命周期分析引擎。
+    分析客户当前所处阶段，推荐优化策略和内容方向。
+    """
+    action = params.get("action", "analyze")
+    
+    if action == "analyze":
+        # Input: customer signals
+        last_touch_day = int(params.get("last_touch_day", 0))
+        customer_grade = params.get("customer_grade", "D")
+        engagement_score = float(params.get("engagement_score", 0.3))
+        content_engaged = params.get("content_engaged", ["policy_update"])
+        
+        # Determine current stage
+        if last_touch_day <= 1:
+            stage = "D0_D1"
+        elif last_touch_day <= 4:
+            stage = "D2_D4"
+        elif last_touch_day <= 7:
+            stage = "D5_D7"
+        elif last_touch_day <= 14:
+            stage = "D8_D14"
+        else:
+            stage = "D15_D30"
+        
+        # Engagement-based recommendations
+        if engagement_score < 0.3:
+            content_strategy = "content_nurture_heavy"  # 重度培育
+        elif engagement_score < 0.6:
+            content_strategy = "content_nurture_light"  # 轻度培育
+        else:
+            content_strategy = "cta_push"  # CTA推进
+        
+        # Stage + grade based recommendation matrix
+        rec_matrix = {
+            ("D0_D1", "A"): {"priority": "high", "next_action": "rapid_transition_D2_D4"},
+            ("D0_D1", "B"): {"priority": "medium", "next_action": "content_nurture"},
+            ("D2_D4", "A"): {"priority": "high", "next_action": "needs_discovery_tool"},
+            ("D5_D7", "A"): {"priority": "urgent", "next_action": "consultation_booking"},
+            ("D8_D14", "A"): {"priority": "critical", "next_action": "proposal_preparation"},
+        }
+        rec = rec_matrix.get((stage, customer_grade), {"priority": "normal", "next_action": "standard_nurture"})
+        
+        return {
+            "result": {
+                "current_stage": stage,
+                "stage_info": LIFECYCLE_STAGES[stage],
+                "engagement_score": engagement_score,
+                "content_strategy": content_strategy,
+                "grade_lifecycle_rec": rec,
+                "recommended_content_types": LIFECYCLE_STAGES[stage]["content_type"],
+                "compliance_level": LIFECYCLE_STAGES[stage]["compliance_level"],
+                "estimated_conversion_timeline_days": 7 + max(0, (int(params.get("last_touch_day", 0)) - 5)),
+                "optimization_suggestions": [
+                    f"当前处于{LIFECYCLE_STAGES[stage]['name']}阶段，建议重点提升互动质量",
+                    f"Grade {customer_grade}客户在{stage}阶段的平均转化周期为7-14天",
+                    f"推荐内容方向：{', '.join(LIFECYCLE_STAGES[stage]['content_type'])}",
+                    "避免在D0-D1阶段提及产品具体收益"
+                ]
+            }
+        }
+    
+    elif action == "get_stages":
+        return {"result": {"lifecycle_stages": LIFECYCLE_STAGES, "total_stages": len(LIFECYCLE_STAGES)}}
+    
+    elif action == "optimize":
+        # Full optimization pipeline
+        grade = params.get("customer_grade", "C")
+        stage = params.get("current_stage", "D2_D4")
+        days_active = int(params.get("days_active", 3))
+        touchpoint_count = int(params.get("touchpoint_count", 2))
+        conversion_probability = float(params.get("conversion_probability", 0.15))
+        
+        suggestions = []
+        if days_active < 7 and grade in ['A', 'B']:
+            suggestions.append({"priority": "high", "action": "accelerate_to_D5", "reason": f"Grade {grade}客户应在D5前触发需求挖掘"})
+        if touchpoint_count < 3:
+            suggestions.append({"priority": "medium", "action": "increase_touchpoints", "reason": "接触点不足，建议补充content_nurture内容"})
+        if conversion_probability > 0.3 and stage not in ["D8_D14", "D15_D30"]:
+            suggestions.append({"priority": "critical", "action": "immediate_cta", "reason": f"转化率{conversion_probability*100:.0f}%已达决策门槛，立即触发CTA"})
+        
+        return {
+            "result": {
+                "optimization_pipeline": True,
+                "current_state": {"grade": grade, "stage": stage, "days_active": days_active, "touchpoints": touchpoint_count},
+                "recommendations": suggestions if suggestions else [{"priority": "normal", "action": "continue_standard_nurture", "reason": "当前节奏合理"}],
+                "estimated_roi_days": 14 if grade in ["A"] else (21 if grade in ["B"] else 30)
+            }
+        }
+    
+    return {"error": "invalid_action", "available_actions": ["analyze", "get_stages", "optimize"]}
+
+
+# ============================================================
+# R30 v2.0: 新增工具 8 - client_crm_tag (CRM标签管理)
+# ============================================================
+
+CRM_TAG_CATEGORIES = {
+    "risk_profile": {"labels": ["健康风险型", "收入保障型", "家庭责任型", "储蓄养老型", "跨境需求型", "境外医疗型"], "weight_source": "needs_assessment"},
+    "purchase_intent": {"labels": ["高意向(ready)", "中意向(concerned)", "低意向(browsing)", "冷客户(cooled)"], "weight_source": "engagement_score"},
+    "compliance_flag": {"labels": ["无风险(clean)", "黄线提醒(yellow_warned)", "红线阻断(red_blocked)", "敏感标签(sensitive)"], "weight_source": "compliance_check"},
+    "lifecycle_stage": {"labels": list(LIFECYCLE_STAGES.keys()), "weight_source": "last_touch_day"},
+    "communication_pref": {"labels": ["文字型(wechat)", "语音型(call)", "图文型(moments)", "不敏感(not_responsive)"], "weight_source": "interaction_history"},
+}
+
+DEMO_CRM_DB: Dict[str, dict] = {}
+
+def handle_client_crm_tag(params: dict) -> dict:
+    """Tool 8: CRM标签同步与分级管理。
+    为给定客户/会话生成或更新CRM标签，支持查询、同步、导出。
+    """
+    action = params.get("action", "generate")
+    session_id = params.get("session_id", params.get("sid", ""))
+    
+    if action == "generate":
+        # Derive tags from needs/grade/compliance data
+        grade = params.get("customer_grade", "D")
+        needs = params.get("needs_detected", [])
+        engagement = float(params.get("engagement_score", 0.1))
+        compliance_status = params.get("compliance_status", "clean")
+        last_touch = int(params.get("last_touch_day", 0))
+        
+        # Risk profile tag
+        risk_tags = []
+        need_map = {"health_concern": "健康风险型", "medical_need": "医疗保障型", "income_protection": "收入保障型",
+                    "family_responsibility": "家庭责任型", "savings_plan": "储蓄养老型", "cross_border": "跨境需求型",
+                    "travel_fear": "境外医疗型"}
+        for n in needs:
+            mapped = need_map.get(n, None)
+            if mapped and mapped not in risk_tags:
+                risk_tags.append(mapped)
+        
+        # Purchase intent
+        if engagement >= 0.7:
+            intent_tag = "高意向(ready)"
+        elif engagement >= 0.4:
+            intent_tag = "中意向(concerned)"
+        elif engagement >= 0.15:
+            intent_tag = "低意向(browsing)"
+        else:
+            intent_tag = "冷客户(cooled)"
+        
+        # Compliance
+        comp_map = {"PASS": "无风险(clean)", "FLAGGED": "黄线提醒(yellow_warned)", "BLOCKED": "红线阻断(red_blocked)"}
+        comp_tag = comp_map.get(compliance_status, "无风险(clean)")
+        
+        # Lifecycle
+        if last_touch <= 1: lc_stage = "D0_D1"
+        elif last_touch <= 4: lc_stage = "D2_D4"
+        elif last_touch <= 7: lc_stage = "D5_D7"
+        elif last_touch <= 14: lc_stage = "D8_D14"
+        else: lc_stage = "D15_D30"
+        
+        tags = {
+            "risk_profile": risk_tags if risk_tags else ["未分类"],
+            "purchase_intent": intent_tag,
+            "compliance_flag": comp_tag,
+            "lifecycle_stage": lc_stage,
+            "customer_grade": grade
+        }
+        
+        if session_id:
+            DEMO_CRM_DB[session_id] = tags
+        
+        return {"result": {"action": "tags_generated", "session_id": session_id, "tags": tags, "tag_categories": list(CRM_TAG_CATEGORIES.keys())}}
+    
+    elif action == "query":
+        sid = params.get("session_id")
+        if not sid:
+            return {"error": "session_id_required"}
+        tags = DEMO_CRM_DB.get(sid)
+        if not tags:
+            return {"result": {"message": f"No CRM tags found for session {sid}"}}
+        return {"result": {"session_id": sid, "tags": tags}}
+    
+    elif action == "export_all":
+        return {"result": {"total_customers": len(DEMO_CRM_DB), "customers": DEMO_CRM_DB}}
+    
+    elif action == "categorize_tags":
+        return {"result": CRM_TAG_CATEGORIES}
+    
+    return {"error": "invalid_action", "available_actions": ["generate", "query", "export_all", "categorize_tags"]}
+
+
+# ============================================================
+# R30 v2.0: 新增工具 9 - multi_turn_dialogue (多轮对话管理)
+# ============================================================
+
+def handle_multi_turn_dialogue(params: dict) -> dict:
+    """Tool 9: 多轮对话上下文管理器。
+    在stdio模式下提供会话级状态追踪（替代外部session_manager依赖）。
+    """
+    action = params.get("action", "create")
+    session_id = params.get("session_id", params.get("sid", ""))
+    
+    if action == "create":
+        sid = session_id or f"sess_{int(time.time())}_{hash(params.get('scenario', '')) % 10000}"
+        _session_store.sessions[sid] = {
+            "session_id": sid,
+            "created_at": datetime.now().isoformat() + "Z",
+            "turn_count": 0,
+            "context_window": [],
+            "max_context_turns": 80,
+            "customer_grade": "D",
+            "urgency": "cold",
+            "needs_detected": [],
+            "intent_history": [],
+            "compliance_flags": [],
+            "products_discussed": [],
+            "sop_day": 0,
+            "total_ctas_sent": 0,
+            "customer_profile": {},
+            "priority_drift_detected": False
+        }
+        return {"result": {"action": "session_created", "session_id": sid, "status": "active", "context_window_size": 80}}
+    
+    elif action == "add_turn":
+        if not session_id:
+            return {"error": "session_id_required"}
+        sess = _session_store.sessions.get(session_id)
+        if not sess:
+            return {"error": "session_not_found", "available_sessions": list(_session_store.sessions.keys())}
+        
+        turn_data = {
+            "turn": sess["turn_count"] + 1,
+            "role": params.get("role", "user"),
+            "content": params.get("content", ""),
+            "extracted_needs": params.get("extracted_needs", []),
+            "grade_at_turn": params.get("grade"),
+            "timestamp": datetime.now().isoformat() + "Z"
+        }
+        
+        sess["turn_count"] += 1
+        # Context window management (sliding window, max 80 turns)
+        sess["context_window"].append(turn_data)
+        if len(sess["context_window"]) > sess["max_context_turns"]:
+            sess["context_window"] = sess["context_window"][-sess["max_context_turns"]:] 
+        
+        # Update grade if changed
+        new_grade = params.get("grade", sess.get("customer_grade"))
+        if new_grade and new_grade != sess["customer_grade"]:
+            sess["customer_grade_evolution"] = sess.get("customer_grade_evolution", []) + [sess["customer_grade"]] + [new_grade]
+        
+        return {"result": {
+            "action": "turn_added",
+            "session_id": session_id,
+            "turn_count": sess["turn_count"],
+            "context_window_size": len(sess["context_window"]),
+            "current_grade": new_grade
+        }}
+    
+    elif action == "get_context":
+        if not session_id:
+            return {"error": "session_id_required"}
+        sess = _session_store.sessions.get(session_id)
+        if not sess:
+            return {"error": "session_not_found"}
+        return {"result": {
+            "session_id": session_id,
+            "turn_count": sess["turn_count"],
+            "customer_grade": sess["customer_grade"],
+            "urgency": sess["urgency"],
+            "context_summary": [t for t in sess["context_window"][-10:]],  # Last 10 turns
+            "compliance_flags_count": len(sess.get("compliance_flags", []))
+        }}
+    
+    elif action == "summarize":
+        if not session_id:
+            return {"error": "session_id_required"}
+        sess = _session_store.sessions.get(session_id)
+        if not sess:
+            return {"error": "session_not_found"}
+        
+        # Auto-generate summary
+        needs_summary = list(set(n for t in sess["context_window"] for n in t.get("extracted_needs", [])))
+        grade_history = sess.get("customer_grade_evolution", []) + [sess["customer_grade"]]
+        
+        return {"result": {
+            "action": "summary_generated",
+            "session_id": session_id,
+            "total_turns": sess["turn_count"],
+            "customer_grade_trajectory": grade_history[-3:],  # Last 3 grades
+            "key_needs": needs_summary[:5],
+            "estimated_conversion_score": min(100, len(needs_summary) * 20 + (30 if sess["customer_grade"] in ["A", "B"] else 0)),
+            "next_recommended_action": "consultation_booking" if sess["customer_grade"] in ["A", "B"] and sess["turn_count"] >= 4 else "content_nurture"
+        }}
+    
+    elif action == "list_sessions":
+        return {"result": {
+            "active_sessions": len(_session_store.sessions),
+            "sessions": [{"id": k, "turns": v["turn_count"], "grade": v["customer_grade"], "created": v["created_at"]}
+                         for k, v in _session_store.sessions.items()]
+        }}
+    
+    elif action == "delete":
+        if not session_id:
+            return {"error": "session_id_required"}
+        if session_id in _session_store.sessions:
+            del _session_store.sessions[session_id]
+            return {"result": {"action": "session_deleted", "session_id": session_id}}
+        return {"error": "session_not_found"}
+    
+    return {"error": "invalid_action", "available_actions": ["create", "add_turn", "get_context", "summarize", "list_sessions", "delete"]}
+
+
+# ============================================================
+# R30 v2.0: 新增工具 10 - compliance_trend_analysis (合规趋势分析)
+# ============================================================
+
+def handle_compliance_trend_analysis(params: dict) -> dict:
+    """Tool 10: 合规趋势分析 + 违规模式检测。
+    分析历史合规检查结果，发现高频违规词/模式，生成改进报告。
+    """
+    action = params.get("action", "analyze")
+    
+    if action == "analyze":
+        # Analyze stored compliance history
+        history = _session_store.compliance_history[-50:]  # Last 50 checks
+        
+        if not history:
+            return {"result": {
+                "status": "no_history",
+                "message": "尚无合规历史数据，请先使用compliance_check记录结果",
+                "suggestion": "将compliance_check的结果session_id传入以关联分析"
+            }}
+        
+        # Aggregate violations by rule_id
+        violation_counts: Dict[str, int] = {}
+        blocked_count = 0
+        flagged_count = 0
+        for entry in history:
+            status = entry.get("status", "")
+            if status == "BLOCKED":
+                blocked_count += 1
+            elif status == "FLAGGED":
+                flagged_count += 1
+            for v in entry.get("violations", []):
+                rid = v.get("rule_id", "unknown")
+                violation_counts[rid] = violation_counts.get(rid, 0) + 1
+        
+        # Sort by frequency
+        top_violations = sorted(violation_counts.items(), key=lambda x: -x[1])[:5]
+        
+        # Risk level assessment
+        total = len(history)
+        violation_rate = (blocked_count + flagged_count) / max(total, 1)
+        if violation_rate > 0.6:
+            risk_level = "HIGH"
+            recommendation = "立即审查所有待发布内容，建立合规预审流程"
+        elif violation_rate > 0.3:
+            risk_level = "MEDIUM"
+            recommendation = "加强内容审核频次，重点关注高频违规规则"
+        else:
+            risk_level = "LOW"
+            recommendation = "维持当前合规标准，定期抽检即可"
+        
+        # RL-011 strict mode coverage check
+        strict_usage = sum(1 for e in history if e.get("strict_mode", False))
+        
+        return {
+            "result": {
+                "status": "analysis_complete",
+                "total_checks": total,
+                "violation_rate": round(violation_rate, 3),
+                "blocked_count": blocked_count,
+                "flagged_count": flagged_count,
+                "risk_level": risk_level,
+                "top_violations": [{"rule_id": r, "count": c} for r, c in top_violations],
+                "compliance_trend": "improving" if blocked_count > flagged_count else "stable",
+                "recommendation": recommendation,
+                "strict_mode_coverage": round(strict_usage / max(total, 1), 3),
+                "policy_update_needed": top_violations[:2] if any(c > 3 for _, c in top_violations) else []
+            }
+        }
+    
+    elif action == "record":
+        # Record a compliance check result for trend analysis
+        session_id = params.get("session_id")
+        status = params.get("status", "PASS")
+        violations = params.get("violations", [])
+        strict_mode = params.get("strict_mode", False)
+        
+        _session_store.compliance_history.append({
+            "session_id": session_id,
+            "status": status,
+            "violations": violations,
+            "strict_mode": strict_mode,
+            "timestamp": datetime.now().isoformat() + "Z"
+        })
+        
+        return {"result": {"action": "recorded", "total_records": len(_session_store.compliance_history)}}
+    
+    elif action == "get_rule_stats":
+        # Per-rule statistics
+        stats = {}
+        for rule in RED_LINE_RULES:
+            rid = rule["rule_id"]
+            hits = sum(1 for e in _session_store.compliance_history for v in e.get("violations", []) if v.get("rule_id") == rid)
+            stats[rid] = {"rule_name": rule["name"], "severity": rule["severity"], "total_hits": hits}
+        for rule in YELLOW_LINE_RULES:
+            rid = rule["rule_id"]
+            hits = sum(1 for e in _session_store.compliance_history for v in e.get("violations", []) if v.get("rule_id") == rid)
+            stats[rid] = {"rule_name": rule["name"], "severity": "MEDIUM", "total_hits": hits}
+        
+        return {"result": {"rule_statistics": stats, "total_rules_monitored": len(RED_LINE_RULES) + len(YELLOW_LINE_RULES)}}
+    
+    return {"error": "invalid_action", "available_actions": ["analyze", "record", "get_rule_stats"]}
+TOOL_HANDLERS = {
+    "insurance_product_query": handle_insurance_product_query,
+    "compliance_check": handle_compliance_check,
+    "needs_assessment": handle_needs_assessment,
+    "objection_handler": handle_objection_handler,
+    "private_sop_runner": handle_private_sop_runner,
+    # R30 v2.0新增工具
+    "compliance_rewrite": handle_compliance_rewrite,
+    "lifecycle_analyzer": handle_lifecycle_analyzer,
+    "client_crm_tag": handle_client_crm_tag,
+    "multi_turn_dialogue": handle_multi_turn_dialogue,
+    "compliance_trend_analysis": handle_compliance_trend_analysis,
+}
+
+
+def main_stdio_loop():
+    """stdio-based MCP server loop"""
+    initialized = False
+    
+    for line in sys.stdin:
+        try:
+            msg_dict = json.loads(line.strip())
+        except json.JSONDecodeError:
+            continue
+
+        # Initialize handshake
+        if msg_dict.get("method") == "initialize":
+            resp = JSONRPCMessage(id=msg_dict.get("id"), result=handle_initialize())
+            sys.stdout.write(resp.to_json())
+            sys.stdout.flush()
+            initialized = True
+            continue
+        
+        # Send initialized notification
+        if msg_dict.get("method") == "notifications/initialized":
+            continue
+
+        # Tools/list request
+        if msg_dict.get("method") == "tools/list":
+            resp = JSONRPCMessage(id=msg_dict.get("id"), result=handle_tools_list())
+            sys.stdout.write(resp.to_json())
+            sys.stdout.flush()
+            continue
+
+        # Tool call request
+        method = msg_dict.get("method", "")
+        if method == "tools/call":
+            # Accept both MCP spec format (params.name) and convenience format (top-level name)
+            params_obj = msg_dict.get("params", {})
+            tool_name = params_obj.get("name", msg_dict.get("name", ""))
+            arguments = params_obj.get("arguments", msg_dict.get("arguments", {}))
+            handler = TOOL_HANDLERS.get(tool_name)
+            
+            if not handler:
+                resp = JSONRPCMessage(
+                    id=msg_dict.get("id"),
+                    error={"code": -32601, "message": f"Tool not found: {tool_name}"}
+                )
+                sys.stdout.write(resp.to_json())
+                sys.stdout.flush()
+                continue
+
+            try:
+                result = handler(arguments)
+            except Exception as e:
+                result = {"error": str(e)}
+
+            resp = JSONRPCMessage(id=msg_dict.get("id"), result=result)
+            sys.stdout.write(resp.to_json())
+            sys.stdout.flush()
+            continue
+
+
+if __name__ == "__main__":
+    main_stdio_loop()
+
+

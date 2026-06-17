@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "insurance-sales-mcp"
+version = "0.1.0"
+description = "保险咨询销售 MCP Server — HKIA GL-44 合规 | 5 tools: product query, compliance check, needs assessment, objection handler, private SOP runner"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Insurance Tech Team"},
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "httpx>=0.27", "coverage"]
+cli = ["click>=8.0", "rich>=13.0"]

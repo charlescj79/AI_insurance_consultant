@@ -1,0 +1,231 @@
+{
+  "version": "1.2.0",
+  "tools": [
+    {
+      "name": "insurance_product_query",
+      "description": "查询香港保险产品条款摘要，含保障范围/免责条款/合规要点",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "detail"
+            ]
+          },
+          "product_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
+      "name": "compliance_check",
+      "description": "14条红线+4条黄线自动化合规扫描（GL-44/GN16），返回BLOCKED/FLAGGED/PASS",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "strict_mode": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "needs_assessment",
+      "description": "客户需求诊断：提取风险信号、客户分级(A/B/C/D)、紧迫度(urgent/warm/cold)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "context_history": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      }
+    },
+    {
+      "name": "objection_handler",
+      "description": "6大类异议场景+3层级话术(light/medium/heavy)生成",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "price",
+              "trust",
+              "delay",
+              "compare",
+              "credibility",
+              "scope"
+            ]
+          },
+          "scenario": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string",
+            "enum": [
+              "light",
+              "medium",
+              "heavy"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "private_sop_runner",
+      "description": "Day-0至Day-7私域客户跟进SOP（含触达时机/话术模板/合规规则）",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "day-sequence",
+              "customer-journey",
+              "get-schedule"
+            ]
+          },
+          "day": {
+            "type": "integer"
+          },
+          "grade": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
+      "name": "compliance_rewrite",
+      "description": "违规内容自动合规修复，返回改写前后对比+改动说明+二次验证结果",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "target_rules": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "lifecycle_analyzer",
+      "description": "D0→D30客户生命周期分析：认知/信任/方案/决策/转化5阶段模型+优化策略",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "analyze",
+              "get_stages",
+              "optimize"
+            ]
+          },
+          "last_touch_day": {
+            "type": "integer"
+          },
+          "customer_grade": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "client_crm_tag",
+      "description": "CRM多维度标签生成(风险/意向/合规/生命周期)及查询导出",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "generate",
+              "query",
+              "export_all",
+              "categorize_tags"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "customer_grade": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "multi_turn_dialogue",
+      "description": "stdio多轮对话上下文管理（80轮滑动窗口）",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "create",
+              "add_turn",
+              "get_context",
+              "summarize",
+              "list_sessions",
+              "delete"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "compliance_trend_analysis",
+      "description": "合规历史趋势分析：高频违规词检测+风险等级评估+改进建议",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "analyze",
+              "record",
+              "get_rule_stats"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

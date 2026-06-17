@@ -1,0 +1,96 @@
+{
+  "name": "insurance-sales-mcp",
+  "version": "1.1.0",
+  "transport": "stdio",
+  "description": "香港保险咨询销售 AI Agent — 5个MCP工具（产品查询/合规检测/需求诊断/异议处理/私域SOP）",
+  "manifest": {
+    "tools": [
+      {
+        "name": "insurance_product_query",
+        "description": "查询香港保险产品条款摘要。支持列出所有产品、模糊搜索产品详情，返回保障范围、免责条款、合规要点等结构化数据。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {"type": "string", "enum": ["list", "detail"], "description": "操作类型"},
+            "product_name": {"type": "string", "description": "产品名称（detail时必需）"}
+          },
+          "required": ["action"]
+        }
+      },
+      {
+        "name": "compliance_check",
+        "description": "合规检测引擎：对保险销售话术/文案执行14条红线规则+4条黄线规则的自动化扫描。返回违规详情、建议改写方案。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {"type": "string", "description": "待检测文本"},
+            "strict_mode": {"type": "boolean", "default": true, "description": "严格模式"}
+          },
+          "required": ["text"]
+        }
+      },
+      {
+        "name": "needs_assessment",
+        "description": "客户需求诊断引擎。从用户消息中提取风险需求信号，评估客户分级(A/B/C/D)，判断紧迫度，推荐对应方案框架。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "message": {"type": "string", "description": "用户消息"},
+            "context_history": {"type": "array", "items": {"type": "string"}, "description": "历史上下文"}
+          },
+          "required": ["message"]
+        }
+      },
+      {
+        "name": "objection_handler",
+        "description": "异议处理话术生成器。内置6大类异议场景，每个3层级话术，返回结构化话术含tone、script。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "category": {"type": "string", "enum": ["price","trust","delay","compare","credibility","scope"]},
+            "scenario": {"type": "string"},
+            "tier": {"type": "string", "enum": ["light","medium","heavy"], "default": "medium"},
+            "list_all": {"type": "boolean", "default": false}
+          }
+        }
+      },
+      {
+        "name": "private_sop_runner",
+        "description": "私域SOP执行器。管理Day-0至Day-7客户跟进全流程，含触达时机、话术模板、合规规则。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {"type": "string", "enum": ["day-sequence","customer-journey","get-schedule"]},
+            "day": {"type": "integer"},
+            "grade": {"type": "string", "enum": ["A","B","C","D"]},
+            "channel": {"type": "string", "enum": ["wechat","moments","call","email"]}
+          },
+          "required": ["action"]
+        }
+      }
+    ]
+  },
+  "setup": {
+    "stdio": {
+      "command": "/Users/charles/.venv/bin/python3",
+      "args": ["/Users/charles/.openclaw/workspace/knowledge/sales-skills/mcp/server.py"]
+    },
+    "http": {
+      "url": "http://localhost:18060/mcp"
+    }
+  },
+  "claude_desktop_config": {
+    "mcpServers": {
+      "insurance-sales": {
+        "command": "/opt/homebrew/bin/python3",
+        "args": ["/Users/charles/.openclaw/workspace/knowledge/sales-skills/mcp/server.py"]
+      }
+    }
+  },
+  "glama_registry": {
+    "category": "insurance",
+    "tags": ["hk-insurance", "compliance", "sales", "private-domain"],
+    "icon": "🏦",
+    "license": "MIT"
+  }
+}
