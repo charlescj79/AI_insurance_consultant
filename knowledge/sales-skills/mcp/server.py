@@ -563,14 +563,26 @@ def handle_insurance_product_query(params: dict) -> dict:
 
 
 def handle_compliance_check(params: dict) -> dict:
-    """Tool 2: 合规检测"""
+    """Tool 2: 合规检测 (R46 智能分类模式)"""
     text = params.get("text", "")
     strict_mode = params.get("strict_mode", False)
 
     violations = []
 
-    # 红线扫描
+    # R46新增: RL-011 主动推荐红线
+    rl011_rule = {"rule_id": "RL-011", "name": "主动推荐禁则",
+                  "pattern": r"(建议投保|推荐您买|强烈推荐|适合购买|可以考虑.*香港险|帮您选.*港险)",
+                  "severity": "CRITICAL"}
+    matches = re.findall(rl011_rule["pattern"], text, re.IGNORECASE)
+    if matches:
+        violations.append({**rl011_rule, "matched_text": matches[0],
+                          "suggestion": RL_REWRITE_DB.get("RL-011", {}).get("good", [""])[0] if "RL_REWRITE_DB" in globals() else "停止主动推荐行为",
+                          "regulatory_ref": REGULATORY_REFS.get("RL-011", "")})
+
+    # 红线扫描（不含RL-011，已单独处理）
     for rule in RED_LINE_RULES:
+        if rule["rule_id"] == "RL-011":
+            continue
         matches = re.findall(rule["pattern"], text, re.IGNORECASE)
         if matches:
             violations.append({
@@ -578,7 +590,7 @@ def handle_compliance_check(params: dict) -> dict:
                 "name": rule["name"],
                 "severity": rule["severity"],
                 "matched_text": matches[0],
-                "suggestion": rule["suggestion"],
+                "suggestion": rule.get("suggestion", rule.get("regulatory_ref", "")),
                 "regulatory_ref": REGULATORY_REFS.get(rule["rule_id"], "")
             })
 
@@ -595,38 +607,68 @@ def handle_compliance_check(params: dict) -> dict:
                 "regulatory_ref": REGULATORY_REFS.get(rule["rule_id"], "")
             })
 
-    # 严格模式额外规则
-    if strict_mode:
-        hidden_patterns = [
-            ("RL-011", "隐式收益暗示", r"(投资回报|资产增值|财富增值)", "MEDIUM", "改为'财务规划工具'"),
-        ]
-        for rid, name, pat, sev, sug in hidden_patterns:
+    # R46: 意图分类
+    QUERY_PATTERNS = [
+        r"(什么是|怎么理解|能解释.*吗|请问.*是什么|.*什么意思|.*和.*区别)",
+        r"(想了解|想问|求教|咨询一下|帮我查|告诉我.*知识)",
+    ]
+    PUSH_PATTERNS = [
+        r"(建议购买|推荐您|为您推荐|强烈建议您|适合您买|帮您选)",
+        r"(联系我投保|加我微信|私信获取|预约投保)",
+    ]
+    intent = "neutral"
+    for pat in PUSH_PATTERNS:
+        if re.search(pat, text):
+            intent = "push"; break
+    if intent == "neutral":
+        for pat in QUERY_PATTERNS:
             if re.search(pat, text):
-                violations.append({
-                    "rule_id": rid, "name": name, "severity": sev,
-                    "matched_text": f"[严格模式触发]",
-                    "suggestion": sug
-                })
+                intent = "query"; break
 
-    # 状态判定
-    has_critical = any(v["severity"] == "CRITICAL" for v in violations)
-    has_high = any(v["severity"] == "HIGH" for v in violations)
+    # R46: 智能状态判定
+    has_rl011 = any(v["rule_id"] == "RL-011" for v in violations)
+    critical_others = [v for v in violations if v.get("severity") == "CRITICAL" and v.get("rule_id") != "RL-011"]
 
-    if has_critical:
+    if has_rl011:
         status = ComplianceStatus.BLOCKED.value
-    elif has_high:
-        status = ComplianceStatus.FLAGGED.value
+        action_taken = "push_intercepted"
+    elif intent == "push" and critical_others:
+        status = ComplianceStatus.BLOCKED.value
+        action_taken = "push_blocked_with_violations"
+    elif intent == "query":
+        if critical_others:
+            status = ComplianceStatus.FLAGGED.value
+            action_taken = "query_flagged_with_violations"
+        else:
+            status = ComplianceStatus.PASS.value
+            action_taken = "query_pass_with_disclaimer"
+    elif intent == "neutral":
+        if critical_others:
+            status = ComplianceStatus.FLAGGED.value
+            action_taken = "neutral_flagged"
+        else:
+            status = ComplianceStatus.PASS.value
+            action_taken = "pass_with_disclaimer"
     else:
-        status = ComplianceStatus.PASS.value
+        has_critical = any(v["severity"] == "CRITICAL" for v in violations)
+        has_high = any(v["severity"] == "HIGH" for v in violations)
+        if has_critical: status = ComplianceStatus.BLOCKED.value
+        elif has_high: status = ComplianceStatus.FLAGGED.value
+        else: status = ComplianceStatus.PASS.value
+        action_taken = "default_determined"
 
     return {
         "result": {
             "compliance_status": status,
+            "intent_classification": intent,  # R46新增
+            "action_taken": action_taken,      # R46新增
             "violations_found": len(violations),
             "violation_details": violations,
             "red_line_count": len([v for v in violations if v["severity"] == "CRITICAL"]),
             "yellow_line_count": len([v for v in violations if v["severity"] == "MEDIUM"]),
             "rule_coverage": {"red_lines": len(RED_LINE_RULES), "yellow_lines": len(YELLOW_LINE_RULES)},
+            "disclaimer_required": status in ["PASS", "FLAGGED"],  # R46新增
+            "disclaimer_text": "本回答仅供参考，不构成专业保险意见。如有需要，请咨询持牌保险中介人。",  # R46新增
         }
     }
 
@@ -886,7 +928,7 @@ def handle_initialize() -> dict:
     return {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {"listChanged": True}},
-        "serverInfo": {"name": "insurance-sales-mcp", "version": "3.0.0"},
+        "serverInfo": {"name": "insurance-sales-mcp", "version": "1.3.0"},
     }
 
 
@@ -1521,6 +1563,30 @@ def main_stdio_loop():
                 result = handler(arguments)
             except Exception as e:
                 result = {"error": str(e)}
+
+            # R46: 对所有合规放行的回复自动注入免责声明
+            if isinstance(result, dict) and "result" in result:
+                comp_status = result.get("result", {}).get("compliance_status", "")
+                action_taken = result.get("result", {}).get("action_taken", "")
+                if comp_status in ("PASS", "FLAGGED") and "BLOCKED" not in str(action_taken):
+                    # 确保 disclaimer_required 字段存在
+                    if "disclaimer_required" not in result["result"]:
+                        result["result"]["disclaimer_required"] = True
+                    if "disclaimer_text" not in result["result"]:
+                        result["result"]["disclaimer_text"] = "本回答仅供参考，不构成专业保险意见。如有需要，请咨询持牌保险中介人。"
+                    # 如果返回的是文本型回复（如needs_assessment/private_sop），追加 disclaimer
+                    if "answer" in result.get("result", {}):
+                        ans = result["result"]["answer"]
+                        if not str(ans).startswith("⚠️"):
+                            result["result"]["answer"] = str(ans) + "\n\n---\n本回答仅供参考，不构成专业保险意见。如有需要，请咨询持牌保险中介人。"
+                    elif "scripts" in result.get("result", {}):
+                        for i, s in enumerate(result["result"]["scripts"]):
+                            if isinstance(s, str) and not str(s).startswith("⚠️"):
+                                result["result"]["scripts"][i] = str(s) + "\n\n---\n本回答仅供参考，不构成专业保险意见。如有需要，请咨询持牌保险中介人。"
+                            elif isinstance(s, dict):
+                                for k in ["script", "content", "text", "message"]:
+                                    if k in s and not str(s[k]).startswith("⚠️"):
+                                        s[k] = str(s[k]) + "\n\n---\n本回答仅供参考，不构成专业保险意见。如有需要，请咨询持牌保险中介人。"
 
             resp = JSONRPCMessage(id=msg_dict.get("id"), result=result)
             sys.stdout.write(resp.to_json())

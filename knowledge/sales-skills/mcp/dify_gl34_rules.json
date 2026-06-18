@@ -1,0 +1,147 @@
+{
+  "_schema": "dify_gl34_rules_v1",
+  "_description": "GL-44合规规则适配Dify平台的保险咨询MCP集成版本",
+  "_version": "1.0.0",
+  "_updated": "2026-06-18",
+  "_applicable_platforms": ["dify_private_deployment"],
+  
+  "gl34_compliance_rules": {
+    "rule_01_banned_terms": {
+      "_name": "禁用术语拦截",
+      "_category": "GL-44 Part II Section 2(b)",
+      "_status": "active",
+      "description": "Dify Agent在生成保险相关内容时必须检测以下香港保监GL-44定义的违规表述",
+      "banned_terms": [
+        "保证回报", "稳赚不赔", "无风险", 
+        "保本保息", "必定获利", "最高收益",
+        "独家", "最便宜", "最好", "第一品牌",
+        "零保费", "免费保险"
+      ],
+      "dify_action": "detect_and_rewrite",
+      "auto_fix_enabled": true,
+      "fallback_message": "本AI工具仅提供信息参考，不构成投资建议。具体保险条款请以保险公司正式保单为准。"
+    },
+
+    "rule_02_disclosure_required": {
+      "_name": "强制免责声明",
+      "_category": "GL-44 Part II Section 3(a)",
+      "_status": "active",
+      "description": "所有保险咨询输出必须包含免责声明",
+      "disclaimer_template": "⚠️ 免责声明: 以上信息仅为AI生成的参考内容，不构成任何投资建议或保险产品推荐。实际保险条款、费率、承保条件以保险公司正式保单为准。投保前请务必咨询持牌保险代理人。",
+      "dify_action": "append_to_all_outputs"
+    },
+
+    "rule_03_data_handling": {
+      "_name": "数据处理合规",
+      "_category": "PDPO + GL-44 Part IV",
+      "_status": "active",
+      "description": "客户数据在Dify处理时的合规要求",
+      "requirements": [
+        "个人可识别信息(PII)不得明文存储于Dify数据库",
+        "保险产品查询结果不得包含客户个人信息",
+        "客户沟通记录需加密存储(PDPO第4、5、6、7条)",
+        "数据出境到境外服务器需获得明确同意"
+      ],
+      "dify_configuration": {
+        "database_encryption": "required",
+        "pii_redaction": "auto",
+        "cross_border_transfer": "blocked_without_consent"
+      }
+    },
+
+    "rule_04_agent_behavior": {
+      "_name": "AI Agent行为规范",
+      "_category": "GL-44 Part V AI Governance",
+      "_status": "active",
+      "description": "Dify中保险咨询Agent的行为约束",
+      "rules": [
+        "Agent不得冒充持牌保险代理人或保险公司员工",
+        "Agent不得主动推荐特定保险产品(需基于客户需求被动提供)",
+        "Agent必须披露其AI身份和局限性",
+        "Agent必须在用户未明确表示投保意向时不收集敏感个人信息"
+      ]
+    },
+
+    "rule_05_product_disclosure": {
+      "_name": "保险产品信息披露",
+      "_category": "GL-44 Part III Product Disclosure",
+      "_status": "active",
+      "description": "当Agent提供保险产品相关咨询时需满足的信息要求",
+      "required_fields_when_discussing_products": [
+        "保险公司名称",
+        "产品名称及编号",
+        "保费范围(如有)",
+        "保障范围摘要",
+        "除外责任摘要",
+        "退保可能损失说明"
+      ],
+      "dify_implementation": "tool_output_schema_extension"
+    },
+
+    "rule_06_sensitive_categories": {
+      "_name": "敏感信息类别保护",
+      "_category": "PDPO + GL-44",
+      "_status": "active",
+      "description": "以下保险相关敏感信息需特殊保护",
+      "sensitive_data_types": [
+        "健康状况(体检报告/病历)",
+        "财务状况(收入/资产/负债)",
+        "家庭成员结构",
+        "既往理赔记录",
+        "个人身份资料(ID/护照/社保证)"
+      ],
+      "dify_handling": {
+        "storage": "encrypted_only",
+        "access": "role_based",
+        "retention": "max_25_years(PDPO第6原则)"
+      }
+    }
+  },
+
+  "mcp_tool_adaptations": {
+    "compliance_check": {
+      "_original_tool": "insurance_sales_server.compliance_check",
+      "_dify_integration": "作为Dify Tool Provider使用",
+      "input_schema_dify_ready": true,
+      "output_format": "structured_json_with_gl34_scores"
+    },
+    "compliance_rewrite": {
+      "_original_tool": "insurance_sales_server.compliance_rewrite",
+      "_dify_integration": "自动修复违规内容并返回合规版本",
+      "dify_use_case": "Agent生成文本→通过此工具校验→返回合规文本→最终输出给客户端"
+    },
+    "product_query": {
+      "_original_tool": "insurance_sales_server.insurance_product_query",
+      "_dify_integration": "在Dify知识库中配置保险产品FAQ+RAG增强",
+      "compliance_note": "产品查询结果自动附加rule_05披露字段"
+    }
+  },
+
+  "dify_deployment_checklist": {
+    "infrastructure": [
+      "使用私有部署(云端SaaS版存在数据出境风险)",
+      "PostgreSQL数据库启用TDE加密",
+      "Docker网络限制为内网仅访问",
+      "API gateway配置HTTPS证书"
+    ],
+    "agent_configuration": [
+      "GL34合规规则注入到Agent system prompt",
+      "compliance_check工具设为mandatory(每次输出前自动调用)",
+      "disclaimer作为output post-processor附加",
+      "产品查询结果自动扩展披露字段"
+    ],
+    "testing_requirements": [
+      "测试所有GL34禁用术语的拦截效果",
+      "测试合规改写工具的修复准确率",
+      "测试数据加密存储验证",
+      "模拟客户PII输入验证脱敏逻辑"
+    ]
+  },
+
+  "compliance_rating": {
+    "_overall": "PENDING - 需CJ部署私有Dify实例后验证",
+    "_data_export_risk": "GREEN - Dify私有部署零数据出境",
+    "_gl44_alignment": "YELLOW - 工具规则已配置, 需部署后实测确认",
+    "_pdpo_compliance": "GREEN (前提: 正确配置PostgreSQL加密)"
+  }
+}

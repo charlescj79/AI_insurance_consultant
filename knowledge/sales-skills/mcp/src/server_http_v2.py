@@ -21,10 +21,6 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# Ensure we can import from both src/ and parent directory
-_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _parent not in sys.path:
-    sys.path.insert(0, _parent)
 from src.server import TOOL_HANDLERS, MCP_TOOLS
 
 # === 配置 ===

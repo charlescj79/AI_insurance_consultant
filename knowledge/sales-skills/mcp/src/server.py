@@ -65,20 +65,23 @@ def _lazy_import(handler_name, module_name):
         return handler(params)
     return wrapper
 
-for _h, _m in [
-    ("handle_insurance_product_query", "product_query"),
-    ("handle_compliance_check", "compliance_check"),
-    ("handle_needs_assessment", "needs_assessment"),
-    ("handle_objection_handler", "objection_handler"),
-    ("handle_private_sop_runner", "private_sop_runner"),
-    ("handle_compliance_rewrite", "compliance_rewrite"),
-    ("handle_lifecycle_analyzer", "lifecycle_analyzer"),
-    ("handle_client_crm_tag", "client_crm_tag"),
-    ("handle_multi_turn_dialogue", "client_crm_tag"),  # Tool 9 is inside client_crm_tag module
-    ("handle_compliance_trend_analysis", "compliance_trend_analysis"),
-    ("handle_gl34_compliance_check", "gl34_compliance_check"),
-]:
-    TOOL_HANDLERS[_h.replace("handle_", "")] = _lazy_import(_h, _m)
+# Map: MCP tool name → (function name in module, module name)
+_TOOLS_MAPPING = [
+    ("insurance_product_query", "handle_product_query", "product_query"),
+    ("compliance_check", "handle_compliance_check", "compliance_check"),
+    ("needs_assessment", "handle_needs_assessment", "needs_assessment"),
+    ("objection_handler", "handle_objection_handler", "objection_handler"),
+    ("private_sop_runner", "handle_private_sop_runner", "private_sop_runner"),
+    ("compliance_rewrite", "handle_compliance_rewrite", "compliance_rewrite"),
+    ("lifecycle_analyzer", "handle_lifecycle_analyzer", "lifecycle_analyzer"),
+    ("client_crm_tag", "handle_client_crm_tag", "client_crm_tag"),
+    ("multi_turn_dialogue", "handle_multi_turn_dialogue", "client_crm_tag"),  # Tool 9 lives in client_crm_tag module
+    ("compliance_trend_analysis", "handle_compliance_trend_analysis", "compliance_trend_analysis"),
+    ("gl34_compliance_check", "handle_gl34_compliance_check", "gl34_compliance_check"),
+]
+
+for _tool_name, _fn_name, _mod_name in _TOOLS_MAPPING:
+    TOOL_HANDLERS[_tool_name] = _lazy_import(_fn_name, _mod_name)
 
 def main_stdio_loop():
     """stdio-based MCP server loop (R32: 仅 ~80行)"""
@@ -110,8 +113,7 @@ def main_stdio_loop():
             params_obj = msg.get("params", {})
             tool_name = params_obj.get("name", "")
             args = params_obj.get("arguments", {})
-            handler_name = f"handle_{tool_name}"
-            handler = TOOL_HANDLERS.get(handler_name)
+            handler = TOOL_HANDLERS.get(tool_name)
 
             if not handler:
                 resp = {"jsonrpc": "2.0", "id": msg.get("id"),
