@@ -1,0 +1,24 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "maintainers": ["charlescj79"],
+  "name": "insurance-sales-mcp",
+  "version": "1.3.0",
+  "description": "Hong Kong Insurance Sales MCP Server — GL-44/GL34 compliance engine, 11 tools for insurance advisory automation with built-in regulatory red-line checks. EU AI Act Art.50 compatible.",
+  "icon": "shield",
+  "category": "Insurance & Finance",
+  "repository": "https://github.com/charlescj79/AI_insurance_consultant",
+  "transport": ["stdio", "streamable-http"],
+  "auth": "none",
+  "keywords": ["insurance", "hong-kong-insurance", "compliance", "GL-44", "GL34", "sales-advisory", "regulatory"],
+  "tools": [
+    "compliance_check", "gl34_compliance_check", "needs_assessment",
+    "objection_handler", "private_sop_runner", "product_query",
+    "lifecycle_analyzer", "client_crm_tag", "multi_turn_dialogue",
+    "compliance_rewrite", "compliance_trend_analysis"
+  ],
+  "publisher": {
+    "provider": "github",
+    "repository": "charlescj79/AI_insurance_consultant",
+    "path": "knowledge/sales-skills/mcp"
+  }
+}
