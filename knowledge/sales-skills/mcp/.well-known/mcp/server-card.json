@@ -1,0 +1,70 @@
+{
+  "$schema": "https://smithery.ai/server-card-schema",
+  "serverInfo": {
+    "name": "insurance-sales-mcp",
+    "version": "1.3.0",
+    "description": "Hong Kong Insurance Sales Advisory MCP Server with GL-44/GL34 compliance engines. 11 professional tools for private domain lead gen, client needs assessment, and regulatory-compliant sales automation."
+  },
+  "authentication": {
+    "required": false,
+    "schemes": ["none"],
+    "notes": "stdio transport requires no auth. HTTP mode uses Bearer token in Authorization header."
+  },
+  "tools": [
+    {
+      "name": "product_query",
+      "description": "Query Hong Kong insurance product specifications and features",
+      "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}, "product_type": {"type": "string"}}, "required": ["keyword"]}
+    },
+    {
+      "name": "compliance_check",
+      "description": "Check content against GL-44 red-line (14 rules) and yellow-line (4 rules) compliance standards"
+    },
+    {
+      "name": "gl34_compliance_check",
+      "description": "Execute GL-34 specific compliance engine for insurance advisor certification requirements"
+    },
+    {
+      "name": "needs_assessment",
+      "description": "Multi-turn customer needs assessment with A-D grading system"
+    },
+    {
+      "name": "objection_handler",
+      "description": "Generate compliant objection handling scripts (6 categories, 3 tiers)"
+    },
+    {
+      "name": "private_sop_runner",
+      "description": "Execute private domain SOP workflows with approval gates"
+    },
+    {
+      "name": "compliance_rewrite",
+      "description": "Auto-rewrite non-compliant content into compliant expressions"
+    },
+    {
+      "name": "lifecycle_analyzer",
+      "description": "D0-D30 customer lifecycle stage analysis and recommendations"
+    },
+    {
+      "name": "client_crm_tag",
+      "description": "Multi-dimensional CRM client tagging and segmentation"
+    },
+    {
+      "name": "multi_turn_dialogue",
+      "description": "Stateful multi-turn insurance consultation with per-turn compliance check"
+    },
+    {
+      "name": "compliance_trend_analysis",
+      "description": "Historical compliance violation pattern analysis and trend reporting"
+    }
+  ],
+  "resources": [],
+  "prompts": [],
+  "transport": ["stdio", "streamable-http"],
+  "repository": "https://github.com/charlescj79/AI_insurance_consultant",
+  "icon": "shield",
+  "category": "Finance & Insurance",
+  "publisher": {
+    "name": "Insurance Tech Team",
+    "email": "charlescj79@gmail.com"
+  }
+}
