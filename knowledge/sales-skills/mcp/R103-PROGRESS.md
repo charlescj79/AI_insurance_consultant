@@ -83,3 +83,12 @@
 ---
 
 _R103 complete. Next round: PyPI publish + mcp.so submission + GitHub topic addition._
+
+## 🚨 Blocker: GitHub Topics via API
+
+- gh api returned 403 — PAT lacks repo topics scope
+- **Manual action required**: CJ needs to visit https://github.com/charlescj79/AI_insurance_consultant → Settings → Tags
+- Add these topics: `mcp-server`, `model-context-protocol`, `insurance`, `hong-kong-insurance`, `compliance`, `GL-44`, `ai-agent`
+- Glama auto-discovery depends on `mcp-server` topic being present
+- **Workaround**: Glama may also index via server-card.json in repo root (already pushed R101)
+
