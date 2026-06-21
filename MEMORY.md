@@ -172,3 +172,48 @@ client_crm_tag, compliance_check, needs_assessment, objection_handler, private_s
 
 ### EU AI Act Article 50 - 🚨 ~12天倒计时 (2026-08-02生效)
 **server-card.json description已含EU AI Art.50披露声明** | README.md需增加合规章节
+
+---
+
+## 【R103关键更新】(2026-06-21T10:00 HKT)
+
+### 平台盘点刷新 (145+ → 152+)
+| 新平台 | 发现内容 | 对接方案 |
+|--------|---------|---------|
+| OpenAI Responses API | **原生MCP支持** (P0战略) | hostedMcpTool + MCPServerStdio/MStreamable HTTP ✅ |
+| MCPize | Monetization唯一选择，80%分成（Founding Member已于Jun10过期） | mcpize deploy一键部署 ✅ |
+| mcp.run (Dylibso) | WebAssembly沙箱+OpenAI API直连认证 | Self-hosted部署到HK区域 ✅ |
+| Agent37 | MCP专属托管平台，Built-in Stripe + 一天上线 | 需确认HK区域 ✅ |
+| OpenAI Agents SDK | Python/TS框架，MCPServerStdio/MStreamableHTTP三种集成 | 对接方案 ✅ |
+| Gartner MCP Gateway预测 | 2026年底75% API网关厂商支持MCP | 战略参考 |
+| MCPBundles | 450+ API工具hub平台，mcp.mcpbundles.com/hub/ | 潜在分发渠道 |
+
+### OpenAI Responses API MCP对接方案（R103核心产出）
+- **Hosted MCP Tool**: `{"type": "mcp", "server_label": "...", "server_url": "..."}` → 零后端代码
+- **OpenAI Agents SDK**: HostedMCPTool + MCPServerStdio/StreamableHTTP三种模式
+- **Assistants API**将于2026-08-26关停（70天），Responses API是唯一替代方案
+- **战略价值**: deploy server后自动接入GPT-4.1+生态，用户一键发现/使用
+- **合规风险**: 数据传输至US → EU AI Act Art.50透明声明已包含在server-card.json
+
+### MCPize Monetization评估（R103）
+- Founding Member rate (15% fee)已于2026年6月10日结束，当前80%分成(20%平台费)
+- mcpize deploy一键部署：HTTPS + Marketplace listing + Stripe monetization
+- 同时支持订阅制 + x402 crypto pay-per-call两种模式
+- 1,000+目录，**香港保险销售MCP品类空白**
+
+### 合规风险评估矩阵更新 (R103)
+| 平台 | 数据出境 | AI咨询合规 | EU AI Act Art.50 | 评级 |
+|------|---------|-----------|-----------------|------|
+| OpenAI Responses API | 🟡 MEDIUM | 🟢 (GL-44本地) | ✅ server-card含声明 | 🟡 YELLOW |
+| MCPize | 🟢 LOW | 🟢 | ✅ 自动HTTPS+审计 | 🟢 GREEN |
+| mcp.run (Self-hosted HK) | 🟢 LOW | 🟢 (WASM隔离) | ✅ 兼容 | 🟢 GREEN |
+| Agent37 | 🟡 MEDIUM | 🟢 | 需确认区域 | 🟡 YELLOW |
+
+### MCP生态数据刷新
+- MCP SDK下载量: **97M+/月** (2026年3月)
+- MCP GitHub stars: **81,000+**
+- Glama: **38,306** servers (Jun 20索引)
+- mcp.so: **20,222** servers
+- Smithery: **7,000+** servers
+- MCP Toplist: **61,799** tracked across all registries
+- Gartner预测: 2026年底 **75% API网关厂商**将支持MCP

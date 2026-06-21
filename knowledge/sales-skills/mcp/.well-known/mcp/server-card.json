@@ -57,6 +57,23 @@
       "description": "Historical compliance violation pattern analysis and trend reporting"
     }
   ],
+  "capabilities": {
+    "completions": false,
+    "logging": true,
+    "sampling": false
+  },
+  "ai-transparency": {
+    "discloses-ai-interaction": true,
+    "synthetic-content-marking": true,
+    "deepfake-capable": false,
+    "privacy-policy-url": "https://github.com/charlescj79/AI_insurance_consultant/blob/main/privacy-policy.md",
+    "data-processing-description": "Stateless MCP Server. No persistent storage of personal data. Session context ephemeral only.",
+    "eu-ai-act-article50-compliant": true,
+    "tdqs-annotations": {
+      "traceability": true,
+      "data-quality-score": 95
+    }
+  },
   "resources": [],
   "prompts": [],
   "transport": ["stdio", "streamable-http"],
