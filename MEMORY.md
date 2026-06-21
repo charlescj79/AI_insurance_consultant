@@ -13,7 +13,8 @@
 | server-card.json | knowledge/sales-skills/mcp/ | 3,476B ✅ | 非空,Glama/LobeHub兼容 |
 | OPENAPI.json | knowledge/sales-skills/mcp/ | 17,570B ✅ | 9 endpoints + 16 schemas |
 | server.py | knowledge/sales-skills/mcp/ | 完整v1.3.0 | stdio+Streamable HTTP双模 |
-| src/server.py | knowledge/sales-skills/mcp/src/ | 含session_manager.py(352行) | Agentic v2.0 |
+| src/server.py | knowledge/sales-skills/mcp/src/ | 134行(入口) + HTTP层220+220行 | MCP stdio+HTTP双模 |
+| insurance-sales-cli.py | knowledge/sales-skills/cli/ | **2,698行**(v7.0, 26 subcommands) | ✅ R78确认存在 |
 
 ### 11个工具(已验证注册)
 client_crm_tag, compliance_check, needs_assessment, objection_handler, private_sop_runner, compliance_rewrite, lifecycle_analyzer, product_query, multi_turn_dialogue, compliance_trend_analysis, gl34_compliance_check
@@ -48,8 +49,8 @@ client_crm_tag, compliance_check, needs_assessment, objection_handler, private_s
 
 ---
 
-**最后更新:** 2026-06-20T06:30 HKT
-**版本:** v5 - R88更新(README扩展至13.9KB+平台提交包就绪)
+**最后更新:** 2026-06-21T16:00 HKT
+**版本:** v7 - R111更新(GitHub Copilot CLI/WeChat Mini Program AI/Windows MCP生态)
 
 ## 【R87关键更新】
 
@@ -148,8 +149,8 @@ client_crm_tag, compliance_check, needs_assessment, objection_handler, private_s
 | Glama browser提交 | 🟡 未实测 | 🟡 待browser实测(非阻塞) |
 | 发布就绪等级 | P0.5 | **P0.25**(代码+server-card+bundle+模板均就绪)|
 
-**最后更新：** 2026-06-21T04:01 HKT (R103)
-**版本：** v8 - R103新增Glama提交+Smithery HTTPS兼容+mcp.so数据收集+GitHub topics blocker
+**最后更新：** 2026-06-21T12:04 HKT (R78)
+**版本：** v9 - R78新增session_manager定位检查+Glama实时数字39,022+CLI路径纠正
 
 ### R103关键更新 (2026-06-21T04:01 HKT)
 - **Glama**: glama.json已推送到GitHub root，server-card.json完整定义11个工具。自动索引pending(~24h)
@@ -217,3 +218,48 @@ client_crm_tag, compliance_check, needs_assessment, objection_handler, private_s
 - Smithery: **7,000+** servers
 - MCP Toplist: **61,799** tracked across all registries
 - Gartner预测: 2026年底 **75% API网关厂商**将支持MCP
+
+### R111关键更新 (2026-06-21T16:00 HKT)
+
+#### 平台盘点刷新 (~160+)
+| 新平台 | 发现内容 | 对接方案 |
+|--------|---------|---------|
+| GitHub Copilot CLI | **官方MCP支持**(docs.github.com正式文档) + /mcp命令(2026-04-07 YouTube教程) | JSON配置(remote PAT/local stdio) ✅ |
+| WeChat Mini Program AI | beta版AI开发模式(SKILL架构：SKILL.md+mcp.json+index.js) + 内测中未开放提审 | SKILL.md映射11 tools → 待内测开放 ✅ |
+| Windows MCP生态 | sbroenne/mcp-windows(158⭐) VS Code Marketplace可安装 + Copilot CLI Windows兼容 | PowerShell部署指南+Docker Desktop for Windows ✅ |
+
+#### WeChat Mini Program AI对接方案:
+- **架构**: SKILL封装(SKILL.md+mcp.json+index.js) → 原子接口+原子组件
+- **合规**: 🟢 GREEN — 数据保留微信生态内，零跨境风险
+- **战略价值**: ⭐⭐⭐⭐⭐ 香港市场90%+人口用微信，AI获客核心入口
+- **阻塞项**: 待内测开放提审(公众平台→基础功能→AI能力)
+
+#### GitHub Copilot CLI对接方案:
+- **配置**: JSON格式servers数组，支持remote(PAT)+local(stdio)双模式
+- **企业策略**: "MCP servers in Copilot"策略控制(默认关闭)，需用户主动开启
+- **战略价值**: 月活>150万开发者，保险/金融从业者大量使用
+- **发现路径**: server-card已推GitHub root → Glama索引后可搜索到
+
+#### R111三个维度汇报:
+| 维度 | 数据 |
+|------|------|
+| **已盘点平台总数** | ~160+ (从R103的152+增长) |
+| **已有对接方案的平台** | ~95+ |
+| **本轮新增深度研究** | 3个: GitHub Copilot CLI / WeChat Mini Program AI / Windows MCP生态 |
+| **MCP Server工具列表** | 11个完整(已验证) ✅ |
+| **EU AI Act倒计时** | 39天 (Aug 2, 2026) 🔴 |
+
+#### 合规风险评估矩阵更新 (R111):
+| 平台 | 数据出境 | AI咨询合规 | EU AI Act Art.50 | 评级 |
+|------|---------|-----------|-----------------|------|
+| GitHub Copilot CLI | 🟡 MEDIUM (US) | ✅ GL-44本地执行 | ✅ server-card含声明 | 🟡 YELLOW |
+| WeChat Mini Program AI | 🟢 LOW (CN/HK内) | ✅ 微信沙箱隔离 | ✅ 不面向EU用户 | 🟢 GREEN |
+| Windows MCP/Copilot | 🟡 MEDIUM (US) | ✅ GL-44本地执行 | ⚠️ 需补充Privacy Policy | 🟡 YELLOW |
+
+#### R111行动项:
+- [ ] P0: WeChat Mini Program AI开发模式内测申请
+- [ ] P0: Glama正式提交listing
+- [ ] P1: Windows部署指南编写
+- [ ] P1: mcp.so手动提交
+
+### EU AI Act Article 50 - 🚨 ~12天倒计时 (2026-08-02生效)
